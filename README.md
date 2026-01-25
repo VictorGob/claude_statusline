@@ -8,8 +8,9 @@ This tool reads JSON from stdin containing model and workspace information, and 
 - Model display name
 - Current directory basename
 - Git branch (if in a git repository)
+- Token usage (remaining/total context window)
 
-**Example output:** `[Claude 3.5 Sonnet] 📁 project | 🌿 main`
+**Example output:** `[Claude 3.5 Sonnet] 📁 project | 🌿 main | 🎫 150k/200k`
 
 ## Requirements
 
@@ -57,13 +58,15 @@ make
 ## Manual Testing
 
 ```bash
-echo '{"model":{"display_name":"Claude 3.5 Sonnet"},"workspace":{"current_dir":"/path/to/project"}}' | ./statusline.sh
+echo '{"model":{"display_name":"Claude 3.5 Sonnet"},"workspace":{"current_dir":"/path/to/project"},"context_window":{"context_window_size":200000,"total_input_tokens":35000,"total_output_tokens":15000}}' | ./statusline.sh
 ```
 
 **Expected output:**
 ```
-[Claude 3.5 Sonnet] 📁 project | 🌿 main
+[Claude 3.5 Sonnet] 📁 project | 🌿 main | 🎫 150k/200k
 ```
+
+**Note:** The token display shows remaining tokens / total context window size in thousands.
 
 ## Make Commands
 
@@ -73,10 +76,11 @@ echo '{"model":{"display_name":"Claude 3.5 Sonnet"},"workspace":{"current_dir":"
 
 ## How It Works
 
-1. Claude Code passes JSON via stdin with model and workspace data
+1. Claude Code passes JSON via stdin with model, workspace, and context window data
 2. The C program parses the JSON using `json-c`
 3. Extracts the directory basename and reads `.git/HEAD` for branch info
-4. Outputs a formatted statusline with UTF-8 emoji support
+4. Calculates token usage from `context_window` data (remaining = window_size - input_tokens - output_tokens)
+5. Outputs a formatted statusline with UTF-8 emoji support, displaying tokens in thousands (e.g., 150k/200k)
 
 ## License
 
