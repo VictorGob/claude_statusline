@@ -84,36 +84,42 @@ int main(void) {
         }
     }
 
-    // Extract context_window information
+    // Extract context_window.used_percentage
     struct json_object *context_window_obj;
-    struct json_object *window_size_obj, *input_tokens_obj, *output_tokens_obj;
-    int window_size = 0;
-    int total_input = 0;
-    int total_output = 0;
+    struct json_object *used_pct_obj;
+    double used_pct = -1;
 
     if (json_object_object_get_ex(root, "context_window", &context_window_obj)) {
-        if (json_object_object_get_ex(context_window_obj, "context_window_size", &window_size_obj)) {
-            window_size = json_object_get_int(window_size_obj);
-        }
-        if (json_object_object_get_ex(context_window_obj, "total_input_tokens", &input_tokens_obj)) {
-            total_input = json_object_get_int(input_tokens_obj);
-        }
-        if (json_object_object_get_ex(context_window_obj, "total_output_tokens", &output_tokens_obj)) {
-            total_output = json_object_get_int(output_tokens_obj);
+        if (json_object_object_get_ex(context_window_obj, "used_percentage", &used_pct_obj)) {
+            used_pct = json_object_get_double(used_pct_obj);
         }
     }
 
-    // Calculate tokens used and remaining
-    int tokens_used = total_input + total_output;
-    int tokens_remaining = window_size - tokens_used;
+    // Extract cost.total_cost_usd
+    struct json_object *cost_obj;
+    struct json_object *total_cost_obj;
+    double total_cost = -1;
 
-    // Format token display (in thousands)
+    if (json_object_object_get_ex(root, "cost", &cost_obj)) {
+        if (json_object_object_get_ex(cost_obj, "total_cost_usd", &total_cost_obj)) {
+            total_cost = json_object_get_double(total_cost_obj);
+        }
+    }
+
+    // Format token display as percentage
     char token_display[64];
-    if (window_size > 0) {
-        snprintf(token_display, sizeof(token_display), " | 🎫 %dk/%dk",
-                 tokens_remaining / 1000, window_size / 1000);
+    if (used_pct >= 0) {
+        snprintf(token_display, sizeof(token_display), " | 🎫 %.0f%%", used_pct);
     } else {
-        token_display[0] = '\0';  // Empty if no context window data
+        token_display[0] = '\0';
+    }
+
+    // Format cost display
+    char cost_display[64];
+    if (total_cost >= 0) {
+        snprintf(cost_display, sizeof(cost_display), " | 💲%.2f", total_cost);
+    } else {
+        cost_display[0] = '\0';
     }
 
     // Get basename of current directory
@@ -124,7 +130,7 @@ int main(void) {
     char *git_branch = read_git_branch();
 
     // Print formatted output
-    printf("[%s] 📁 %s%s%s\n", model_name, dir_basename, git_branch, token_display);
+    printf("[%s] 📁 %s%s%s%s\n", model_name, dir_basename, git_branch, token_display, cost_display);
 
     // Cleanup
     free(dir_copy);
