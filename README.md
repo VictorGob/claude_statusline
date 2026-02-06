@@ -1,85 +1,47 @@
 # Claude Statusline
 
-A fast C implementation of a custom statusline formatter for Claude Code.
+A fast C statusline formatter for [Claude Code](https://claude.com/claude-code). Reads JSON from stdin, outputs a two-line ANSI-colored status display.
 
-## Overview
-
-This tool reads JSON from stdin containing model and workspace information, and outputs a formatted status line with:
-- Model display name
-- Current directory basename
-- Git branch (if in a git repository)
-- Context window usage percentage
-- Session cost in USD
-
-**Example output:** `[Opus] 📁 project | 🌿 main | 🎫 42% | 💲0.01`
-
-## Requirements
-
-- GCC or compatible C compiler
-- `libjson-c-dev` library
-
-### Installing Dependencies
-
-**Ubuntu/Debian:**
-```bash
-sudo apt-get install libjson-c-dev
+```
+[Opus] 📁 project | 🌿 main | 💲0.05
+🎫 42% | 🔤 50k in / 12k out | ✏️ +156 / -23
 ```
 
-**macOS:**
-```bash
-brew install json-c
+**Line 1:** model, directory, git branch, session cost
+**Line 2:** context window %, token counts, lines changed (shown only when data is available)
+
+## Benchmark
+
+```
+Time (mean ± σ):   4.3 ms ± 0.2 ms   [User: 0.9 ms, System: 0.3 ms]
+Range (min … max): 3.8 ms … 5.2 ms    500 runs   (hyperfine)
 ```
 
-## Building
+## Setup
+
+**Dependencies:** `libjson-c-dev` (Ubuntu/Debian: `sudo apt-get install libjson-c-dev`, macOS: `brew install json-c`)
 
 ```bash
 make
 ```
 
-## Configuration in Claude Code
+Add to `~/.claude/settings.json`:
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "/absolute/path/to/claude_statusline/statusline.sh",
+    "padding": 0
+  }
+}
+```
 
-1. **Build the binary:**
-   ```bash
-   make
-   ```
-
-2. **Add to your Claude Code settings** (`~/.claude/settings.json`):
-   ```json
-   {
-     "statusLine": {
-       "type": "command",
-       "command": "/absolute/path/to/claude_statusline/statusline.sh",
-       "padding": 0
-     }
-   }
-   ```
-
-3. **Restart Claude Code** or start a new conversation to see the custom statusline
-
-## Manual Testing
+## Testing
 
 ```bash
+make test
 cat input.json | ./statusline.sh
 ```
-
-**Expected output:**
-```
-[Opus] 📁 directory | 🌿 main | 🎫 42% | 💲0.01
-```
-
-## Make Commands
-
-- `make` - Build the binary
-- `make test` - Run tests
-- `make clean` - Remove built artifacts
-
-## How It Works
-
-1. Claude Code passes JSON via stdin with model, workspace, and context window data
-2. The C program parses the JSON using `json-c`
-3. Extracts the directory basename and reads `.git/HEAD` for branch info
-4. Reads `context_window.used_percentage` and `cost.total_cost_usd` from the JSON
-5. Outputs a formatted statusline with UTF-8 emoji support
 
 ## License
 
