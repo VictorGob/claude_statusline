@@ -4,14 +4,24 @@ A fast C implementation of a custom statusline formatter for Claude Code.
 
 ## Overview
 
-This tool reads JSON from stdin containing model and workspace information, and outputs a formatted status line with:
+This tool reads JSON from stdin containing model and workspace information, and outputs a formatted two-line status display:
+
+**Line 1** — Model, directory, git branch, cost:
 - Model display name
 - Current directory basename
 - Git branch (if in a git repository)
-- Context window usage percentage
 - Session cost in USD
 
-**Example output:** `[Opus] 📁 project | 🌿 main | 🎫 42% | 💲0.01`
+**Line 2** — Context and token stats (only shown if data available):
+- Context window usage percentage
+- Token counts (input/output, compact format like 50k, 1.2M)
+- Lines changed (+added / -removed)
+
+**Example output:**
+```
+[Opus] 📁 project | 🌿 main | 💲0.05
+🎫 42% | 🔤 50k in / 12k out | ✏️ +156 / -23
+```
 
 ## Requirements
 
@@ -64,7 +74,8 @@ cat input.json | ./statusline.sh
 
 **Expected output:**
 ```
-[Opus] 📁 directory | 🌿 main | 🎫 42% | 💲0.01
+[Opus] 📁 directory | 🌿 main | 💲0.01
+🎫 42% | 🔤 50k in / 12k out | ✏️ +156 / -23
 ```
 
 ## Make Commands
@@ -78,8 +89,8 @@ cat input.json | ./statusline.sh
 1. Claude Code passes JSON via stdin with model, workspace, and context window data
 2. The C program parses the JSON using `json-c`
 3. Extracts the directory basename and reads `.git/HEAD` for branch info
-4. Reads `context_window.used_percentage` and `cost.total_cost_usd` from the JSON
-5. Outputs a formatted statusline with UTF-8 emoji support
+4. Reads `context_window.used_percentage`, `total_input_tokens`, `total_output_tokens`, `cost.total_cost_usd`, `total_lines_added`, and `total_lines_removed` from the JSON
+5. Outputs line 1 (model, dir, branch, cost) and line 2 (context %, tokens, lines changed) with UTF-8 emoji support
 
 ## License
 
