@@ -10,6 +10,25 @@
 #define GIT_HEAD_PATH ".git/HEAD"
 #define GIT_REF_PREFIX "ref: refs/heads/"
 
+/* Format token count as compact string: 50000 -> "50k", 1200000 -> "1.2M" */
+void format_tokens(int tokens, char *buf, size_t buf_size) {
+    if (tokens >= 1000000) {
+        double m = tokens / 1000000.0;
+        if (m >= 10.0)
+            snprintf(buf, buf_size, "%.0fM", m);
+        else
+            snprintf(buf, buf_size, "%.1fM", m);
+    } else if (tokens >= 1000) {
+        double k = tokens / 1000.0;
+        if (k >= 10.0)
+            snprintf(buf, buf_size, "%.0fk", k);
+        else
+            snprintf(buf, buf_size, "%.1fk", k);
+    } else {
+        snprintf(buf, buf_size, "%d", tokens);
+    }
+}
+
 char* read_git_branch(void) {
     FILE *fp;
     static char branch[256] = "";
@@ -106,12 +125,34 @@ int main(void) {
         }
     }
 
-    // Format token display as percentage
-    char token_display[64];
-    if (used_pct >= 0) {
-        snprintf(token_display, sizeof(token_display), " | 🎫 %.0f%%", used_pct);
-    } else {
-        token_display[0] = '\0';
+    // Extract context_window.total_input_tokens
+    struct json_object *input_tokens_obj;
+    int input_tokens = -1;
+    if (json_object_object_get_ex(root, "context_window", &context_window_obj)) {
+        if (json_object_object_get_ex(context_window_obj, "total_input_tokens", &input_tokens_obj)) {
+            input_tokens = json_object_get_int(input_tokens_obj);
+        }
+    }
+
+    // Extract context_window.total_output_tokens
+    struct json_object *output_tokens_obj;
+    int output_tokens = -1;
+    if (json_object_object_get_ex(root, "context_window", &context_window_obj)) {
+        if (json_object_object_get_ex(context_window_obj, "total_output_tokens", &output_tokens_obj)) {
+            output_tokens = json_object_get_int(output_tokens_obj);
+        }
+    }
+
+    // Extract cost.total_lines_added and cost.total_lines_removed
+    struct json_object *lines_added_obj, *lines_removed_obj;
+    int lines_added = -1, lines_removed = -1;
+    if (json_object_object_get_ex(root, "cost", &cost_obj)) {
+        if (json_object_object_get_ex(cost_obj, "total_lines_added", &lines_added_obj)) {
+            lines_added = json_object_get_int(lines_added_obj);
+        }
+        if (json_object_object_get_ex(cost_obj, "total_lines_removed", &lines_removed_obj)) {
+            lines_removed = json_object_get_int(lines_removed_obj);
+        }
     }
 
     // Format cost display
@@ -129,8 +170,39 @@ int main(void) {
     // Get git branch
     char *git_branch = read_git_branch();
 
-    // Print formatted output
-    printf("[%s] 📁 %s%s%s%s\n", model_name, dir_basename, git_branch, token_display, cost_display);
+    // Print line 1: [Model] 📁 dir | 🌿 branch | 💲cost
+    printf("[%s] 📁 %s%s%s\n", model_name, dir_basename, git_branch, cost_display);
+
+    // Build and print line 2 (only if there's data)
+    char line2[512];
+    int pos = 0;
+    int has_content = 0;
+
+    if (used_pct >= 0) {
+        pos += snprintf(line2 + pos, sizeof(line2) - pos, "🎫 %.0f%%", used_pct);
+        has_content = 1;
+    }
+
+    if (input_tokens >= 0 && output_tokens >= 0) {
+        char in_buf[32], out_buf[32];
+        format_tokens(input_tokens, in_buf, sizeof(in_buf));
+        format_tokens(output_tokens, out_buf, sizeof(out_buf));
+        if (has_content)
+            pos += snprintf(line2 + pos, sizeof(line2) - pos, " | ");
+        pos += snprintf(line2 + pos, sizeof(line2) - pos, "🔤 %s in / %s out", in_buf, out_buf);
+        has_content = 1;
+    }
+
+    if (lines_added >= 0 && lines_removed >= 0) {
+        if (has_content)
+            pos += snprintf(line2 + pos, sizeof(line2) - pos, " | ");
+        pos += snprintf(line2 + pos, sizeof(line2) - pos, "✏️ +%d / -%d", lines_added, lines_removed);
+        has_content = 1;
+    }
+
+    if (has_content) {
+        printf("%s\n", line2);
+    }
 
     // Cleanup
     free(dir_copy);
