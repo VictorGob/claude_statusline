@@ -10,6 +10,13 @@
 #define GIT_HEAD_PATH ".git/HEAD"
 #define GIT_REF_PREFIX "ref: refs/heads/"
 
+#define COLOR_GREEN  "\033[32m"
+#define COLOR_YELLOW "\033[33m"
+#define COLOR_RED    "\033[31m"
+#define COLOR_CYAN   "\033[36m"
+#define COLOR_RESET  "\033[0m"
+#define STYLE_BOLD   "\033[1m"
+
 /* Format token count as compact string: 50000 -> "50k", 1200000 -> "1.2M" */
 void format_tokens(int tokens, char *buf, size_t buf_size) {
     if (tokens >= 1000000) {
@@ -49,7 +56,7 @@ char* read_git_branch(void) {
 
         // Check if it starts with "ref: refs/heads/"
         if (strncmp(line, GIT_REF_PREFIX, strlen(GIT_REF_PREFIX)) == 0) {
-            snprintf(branch, sizeof(branch), " | 🌿 %s",
+            snprintf(branch, sizeof(branch), " | 🌿 " COLOR_GREEN "%s" COLOR_RESET,
                      line + strlen(GIT_REF_PREFIX));
         }
     }
@@ -103,56 +110,33 @@ int main(void) {
         }
     }
 
-    // Extract context_window.used_percentage
+    // Extract context_window fields
     struct json_object *context_window_obj;
-    struct json_object *used_pct_obj;
+    struct json_object *tmp;
     double used_pct = -1;
+    int input_tokens = -1, output_tokens = -1;
 
     if (json_object_object_get_ex(root, "context_window", &context_window_obj)) {
-        if (json_object_object_get_ex(context_window_obj, "used_percentage", &used_pct_obj)) {
-            used_pct = json_object_get_double(used_pct_obj);
-        }
+        if (json_object_object_get_ex(context_window_obj, "used_percentage", &tmp))
+            used_pct = json_object_get_double(tmp);
+        if (json_object_object_get_ex(context_window_obj, "total_input_tokens", &tmp))
+            input_tokens = json_object_get_int(tmp);
+        if (json_object_object_get_ex(context_window_obj, "total_output_tokens", &tmp))
+            output_tokens = json_object_get_int(tmp);
     }
 
-    // Extract cost.total_cost_usd
+    // Extract cost fields
     struct json_object *cost_obj;
-    struct json_object *total_cost_obj;
     double total_cost = -1;
-
-    if (json_object_object_get_ex(root, "cost", &cost_obj)) {
-        if (json_object_object_get_ex(cost_obj, "total_cost_usd", &total_cost_obj)) {
-            total_cost = json_object_get_double(total_cost_obj);
-        }
-    }
-
-    // Extract context_window.total_input_tokens
-    struct json_object *input_tokens_obj;
-    int input_tokens = -1;
-    if (json_object_object_get_ex(root, "context_window", &context_window_obj)) {
-        if (json_object_object_get_ex(context_window_obj, "total_input_tokens", &input_tokens_obj)) {
-            input_tokens = json_object_get_int(input_tokens_obj);
-        }
-    }
-
-    // Extract context_window.total_output_tokens
-    struct json_object *output_tokens_obj;
-    int output_tokens = -1;
-    if (json_object_object_get_ex(root, "context_window", &context_window_obj)) {
-        if (json_object_object_get_ex(context_window_obj, "total_output_tokens", &output_tokens_obj)) {
-            output_tokens = json_object_get_int(output_tokens_obj);
-        }
-    }
-
-    // Extract cost.total_lines_added and cost.total_lines_removed
-    struct json_object *lines_added_obj, *lines_removed_obj;
     int lines_added = -1, lines_removed = -1;
+
     if (json_object_object_get_ex(root, "cost", &cost_obj)) {
-        if (json_object_object_get_ex(cost_obj, "total_lines_added", &lines_added_obj)) {
-            lines_added = json_object_get_int(lines_added_obj);
-        }
-        if (json_object_object_get_ex(cost_obj, "total_lines_removed", &lines_removed_obj)) {
-            lines_removed = json_object_get_int(lines_removed_obj);
-        }
+        if (json_object_object_get_ex(cost_obj, "total_cost_usd", &tmp))
+            total_cost = json_object_get_double(tmp);
+        if (json_object_object_get_ex(cost_obj, "total_lines_added", &tmp))
+            lines_added = json_object_get_int(tmp);
+        if (json_object_object_get_ex(cost_obj, "total_lines_removed", &tmp))
+            lines_removed = json_object_get_int(tmp);
     }
 
     // Format cost display
@@ -170,16 +154,27 @@ int main(void) {
     // Get git branch
     char *git_branch = read_git_branch();
 
-    // Print line 1: [Model] 📁 dir | 🌿 branch | 💲cost
-    printf("[%s] 📁 %s%s%s\n", model_name, dir_basename, git_branch, cost_display);
+    // Build line 1 into buffer: [Model] 📁 dir | 🌿 branch | 💲cost
+    char line1[512];
+    snprintf(line1, sizeof(line1), "[" STYLE_BOLD "%s" COLOR_RESET "] 📁 " COLOR_CYAN "%s" COLOR_RESET "%s%s",
+             model_name, dir_basename, git_branch, cost_display);
 
-    // Build and print line 2 (only if there's data)
+    // Build line 2 (only if there's data)
     char line2[512];
     int pos = 0;
     int has_content = 0;
 
     if (used_pct >= 0) {
-        pos += snprintf(line2 + pos, sizeof(line2) - pos, "🎫 %.0f%%", used_pct);
+        const char *pct_color = "";
+        const char *pct_reset = "";
+        if (used_pct >= 90) {
+            pct_color = COLOR_RED;
+            pct_reset = COLOR_RESET;
+        } else if (used_pct >= 60) {
+            pct_color = COLOR_YELLOW;
+            pct_reset = COLOR_RESET;
+        }
+        pos += snprintf(line2 + pos, sizeof(line2) - pos, "%s🎫 %.0f%%%s", pct_color, used_pct, pct_reset);
         has_content = 1;
     }
 
@@ -196,13 +191,13 @@ int main(void) {
     if (lines_added >= 0 && lines_removed >= 0) {
         if (has_content)
             pos += snprintf(line2 + pos, sizeof(line2) - pos, " | ");
-        pos += snprintf(line2 + pos, sizeof(line2) - pos, "✏️ +%d / -%d", lines_added, lines_removed);
+        pos += snprintf(line2 + pos, sizeof(line2) - pos, "✏️ " COLOR_GREEN "+%d" COLOR_RESET " / " COLOR_RED "-%d" COLOR_RESET, lines_added, lines_removed);
         has_content = 1;
     }
 
-    if (has_content) {
+    printf("%s\n", line1);
+    if (has_content)
         printf("%s\n", line2);
-    }
 
     // Cleanup
     free(dir_copy);
