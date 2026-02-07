@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -std=c99
+CFLAGS = -Wall -Wextra -std=c99 -O2 -s
 LIBS = -ljson-c
 TARGET = claude_statusline
 SRC = main.c

@@ -37,7 +37,7 @@ void format_tokens(int tokens, char *buf, size_t buf_size) {
 
 char* read_git_branch(void) {
     FILE *fp;
-    static char branch[256] = "";
+    static char branch[544] = "";
     char line[512];
 
     if (access(GIT_HEAD_PATH, F_OK) != 0) {
