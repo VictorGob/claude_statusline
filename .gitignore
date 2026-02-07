@@ -6,7 +6,6 @@ claude_statusline
 
 # Claude local configuration
 .claude/
-CLAUDE.md
 
 # Editor files
 *.swp
