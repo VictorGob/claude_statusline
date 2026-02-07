@@ -13,8 +13,8 @@ A fast C statusline formatter for [Claude Code](https://claude.com/claude-code).
 ## Benchmark
 
 ```
-Time (mean ± σ):   5.0 ms ± 0.8 ms   [User: 1.1 ms, System: 0.5 ms]
-Range (min … max): 3.5 ms … 17.5 ms    500 runs   (hyperfine)
+Time (mean ± σ):   4.9 ms ± 0.4 ms   [User: 1.0 ms, System: 0.6 ms]
+Range (min … max): 3.2 ms … 10.1 ms    500 runs   (hyperfine, -O2 -s)
 ```
 
 ## Setup
