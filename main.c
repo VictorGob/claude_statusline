@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <json-c/json.h>
-#include <libgen.h>
 #include <unistd.h>
 
 #define BUFFER_SIZE 4096
@@ -148,8 +147,8 @@ int main(void) {
     }
 
     // Get basename of current directory
-    char *dir_copy = strdup(current_dir_full);
-    char *dir_basename = basename(dir_copy);
+    const char *dir_basename = strrchr(current_dir_full, '/');
+    dir_basename = dir_basename ? dir_basename + 1 : current_dir_full;
 
     // Get git branch
     char *git_branch = read_git_branch();
@@ -200,7 +199,6 @@ int main(void) {
         printf("%s\n", line2);
 
     // Cleanup
-    free(dir_copy);
     json_object_put(root);
 
     return 0;
