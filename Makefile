@@ -23,3 +23,6 @@ test: $(TARGET)
 	@echo ""
 	@echo "Testing with current directory..."
 	@echo '{"model":{"display_name":"Claude Opus"},"workspace":{"current_dir":"'$$(pwd)'"},"context_window":{"used_percentage":75,"total_input_tokens":1200000,"total_output_tokens":300000},"cost":{"total_cost_usd":1.23,"total_lines_added":42,"total_lines_removed":10}}' | ./$(TARGET)
+	@echo ""
+	@echo "Testing clickable usage link..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":50,"total_input_tokens":1000,"total_output_tokens":500}}' | ./$(TARGET) | grep -q '8;;https://claude.ai/settings/usage' && echo "PASS: usage link present" || echo "FAIL: usage link missing"

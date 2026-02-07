@@ -8,7 +8,7 @@ A fast C statusline formatter for [Claude Code](https://claude.com/claude-code).
 ```
 
 **Line 1:** model, directory, git branch, session cost
-**Line 2:** context window %, token counts, lines changed (shown only when data is available)
+**Line 2:** context window % ([clickable link](https://claude.ai/settings/usage) in supported terminals), token counts, lines changed (shown only when data is available)
 
 ## Benchmark
 
