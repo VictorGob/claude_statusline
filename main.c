@@ -174,7 +174,7 @@ int main(void) {
             pct_color = COLOR_YELLOW;
             pct_reset = COLOR_RESET;
         }
-        pos += snprintf(line2 + pos, sizeof(line2) - pos, "%s🎫 %.0f%%%s", pct_color, used_pct, pct_reset);
+        pos += snprintf(line2 + pos, sizeof(line2) - pos, "\033]8;;https://claude.ai/settings/usage\033\\%s🎫 %.0f%%%s\033]8;;\033\\", pct_color, used_pct, pct_reset);
         has_content = 1;
     }
 
