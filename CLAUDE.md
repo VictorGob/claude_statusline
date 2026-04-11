@@ -1,6 +1,6 @@
 # claude_statusline
 
-C statusline formatter for Claude Code. Reads JSON from stdin (provided by Claude Code's `--output-format stream-json`) and outputs an ANSI-colored two-line display showing model, directory, git branch, cost, context usage, and line changes.
+C statusline formatter for Claude Code. Reads JSON from stdin (piped by Claude Code's statusline runner) and outputs an ANSI-colored two-line display showing model, directory, git branch, session name, context usage, token counts, and 5-hour rate limit.
 
 ## Build
 
@@ -30,9 +30,9 @@ The program parses these fields from the JSON object piped to stdin:
 | `context_window.used_percentage` | number | Context % (color-coded) |
 | `context_window.total_input_tokens` | int | Token counts (compact format) |
 | `context_window.total_output_tokens` | int | Token counts (compact format) |
-| `cost.total_cost_usd` | number | Session cost |
-| `cost.total_lines_added` | int | Lines added (green) |
-| `cost.total_lines_removed` | int | Lines removed (red) |
+| `session_name` | string | Session name (shown on line 1; absent if not set via `--name` or `/rename`) |
+| `rate_limits.five_hour.used_percentage` | number | 5h rate limit used % (color-coded; Pro/Max only) |
+| `rate_limits.five_hour.resets_at` | int | Unix epoch seconds when 5h window resets (countdown display) |
 
 All fields are optional; missing fields are silently skipped.
 

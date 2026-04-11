@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <json-c/json.h>
 #include <unistd.h>
 
@@ -109,6 +109,15 @@ int main(void) {
         }
     }
 
+    // Extract session_name (optional, absent if not set)
+    struct json_object *session_name_obj;
+    char session_display[256] = "";
+    if (json_object_object_get_ex(root, "session_name", &session_name_obj)) {
+        const char *sname = json_object_get_string(session_name_obj);
+        if (sname && sname[0] != '\0')
+            snprintf(session_display, sizeof(session_display), " | 🏷️ %s", sname);
+    }
+
     // Extract context_window fields
     struct json_object *context_window_obj;
     struct json_object *tmp;
@@ -124,26 +133,18 @@ int main(void) {
             output_tokens = json_object_get_int(tmp);
     }
 
-    // Extract cost fields
-    struct json_object *cost_obj;
-    double total_cost = -1;
-    int lines_added = -1, lines_removed = -1;
+    // Extract rate_limits.five_hour fields
+    struct json_object *rate_limits_obj, *five_hour_obj;
+    double five_hour_pct = -1;
+    int64_t resets_at = -1;
 
-    if (json_object_object_get_ex(root, "cost", &cost_obj)) {
-        if (json_object_object_get_ex(cost_obj, "total_cost_usd", &tmp))
-            total_cost = json_object_get_double(tmp);
-        if (json_object_object_get_ex(cost_obj, "total_lines_added", &tmp))
-            lines_added = json_object_get_int(tmp);
-        if (json_object_object_get_ex(cost_obj, "total_lines_removed", &tmp))
-            lines_removed = json_object_get_int(tmp);
-    }
-
-    // Format cost display
-    char cost_display[64];
-    if (total_cost >= 0) {
-        snprintf(cost_display, sizeof(cost_display), " | 💲%.2f", total_cost);
-    } else {
-        cost_display[0] = '\0';
+    if (json_object_object_get_ex(root, "rate_limits", &rate_limits_obj)) {
+        if (json_object_object_get_ex(rate_limits_obj, "five_hour", &five_hour_obj)) {
+            if (json_object_object_get_ex(five_hour_obj, "used_percentage", &tmp))
+                five_hour_pct = json_object_get_double(tmp);
+            if (json_object_object_get_ex(five_hour_obj, "resets_at", &tmp))
+                resets_at = json_object_get_int64(tmp);
+        }
     }
 
     // Get basename of current directory
@@ -153,10 +154,10 @@ int main(void) {
     // Get git branch
     char *git_branch = read_git_branch();
 
-    // Build line 1 into buffer: [Model] 📁 dir | 🌿 branch | 💲cost
+    // Build line 1 into buffer: [Model] 📁 dir | 🌿 branch | 🏷️ session
     char line1[512];
     snprintf(line1, sizeof(line1), "[" STYLE_BOLD "%s" COLOR_RESET "] 📁 " COLOR_CYAN "%s" COLOR_RESET "%s%s",
-             model_name, dir_basename, git_branch, cost_display);
+             model_name, dir_basename, git_branch, session_display);
 
     // Build line 2 (only if there's data)
     char line2[512];
@@ -173,7 +174,7 @@ int main(void) {
             pct_color = COLOR_YELLOW;
             pct_reset = COLOR_RESET;
         }
-        pos += snprintf(line2 + pos, sizeof(line2) - pos, "\033]8;;https://claude.ai/settings/usage\033\\%s🎫 %.0f%%%s\033]8;;\033\\", pct_color, used_pct, pct_reset);
+        pos += snprintf(line2 + pos, sizeof(line2) - pos, "%s🎫 %.0f%%%s", pct_color, used_pct, pct_reset);
         has_content = 1;
     }
 
@@ -187,10 +188,31 @@ int main(void) {
         has_content = 1;
     }
 
-    if (lines_added >= 0 && lines_removed >= 0) {
+    if (five_hour_pct >= 0) {
+        const char *rl_color = "";
+        const char *rl_reset = "";
+        if (five_hour_pct >= 90) {
+            rl_color = COLOR_RED;
+            rl_reset = COLOR_RESET;
+        } else if (five_hour_pct >= 60) {
+            rl_color = COLOR_YELLOW;
+            rl_reset = COLOR_RESET;
+        }
         if (has_content)
             pos += snprintf(line2 + pos, sizeof(line2) - pos, " | ");
-        pos += snprintf(line2 + pos, sizeof(line2) - pos, "✏️ " COLOR_GREEN "+%d" COLOR_RESET " / " COLOR_RED "-%d" COLOR_RESET, lines_added, lines_removed);
+
+        long remaining = (resets_at > 0) ? (long)(resets_at - (int64_t)time(NULL)) : -1;
+        char reset_buf[128] = "";
+        if (remaining > 0) {
+            long h = remaining / 3600;
+            long m = (remaining % 3600) / 60;
+            if (h > 0)
+                snprintf(reset_buf, sizeof(reset_buf), ", \033]8;;https://claude.ai/settings/usage\033\\resets in %ldh%ldm\033]8;;\033\\", h, m);
+            else
+                snprintf(reset_buf, sizeof(reset_buf), ", \033]8;;https://claude.ai/settings/usage\033\\resets in %ldm\033]8;;\033\\", m);
+        }
+        pos += snprintf(line2 + pos, sizeof(line2) - pos, "⏱️ 5h: %s%.0f%%%s%s",
+                        rl_color, five_hour_pct, rl_reset, reset_buf);
         has_content = 1;
     }
 
