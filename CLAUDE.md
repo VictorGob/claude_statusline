@@ -28,11 +28,10 @@ The program parses these fields from the JSON object piped to stdin:
 | `model.display_name` | string | Model name in header |
 | `workspace.current_dir` | string | Directory basename |
 | `context_window.used_percentage` | number | Context % (color-coded) |
-| `context_window.total_input_tokens` | int | Token counts (compact format) |
-| `context_window.total_output_tokens` | int | Token counts (compact format) |
-| `session_name` | string | Session name (shown on line 1; absent if not set via `--name` or `/rename`) |
 | `rate_limits.five_hour.used_percentage` | number | 5h rate limit used % (color-coded; Pro/Max only) |
 | `rate_limits.five_hour.resets_at` | int | Unix epoch seconds when 5h window resets (countdown display) |
+| `rate_limits.seven_day.used_percentage` | number | 7d (weekly) rate limit used % (color-coded; Pro/Max only) |
+| `rate_limits.seven_day.resets_at` | int | Unix epoch seconds when 7d window resets (countdown display) |
 
 All fields are optional; missing fields are silently skipped.
 

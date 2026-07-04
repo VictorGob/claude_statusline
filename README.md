@@ -3,12 +3,12 @@
 A fast C statusline formatter for [Claude Code](https://claude.com/claude-code). Reads JSON from stdin, outputs a two-line ANSI-colored status display.
 
 ```
-[Opus] 📁 project | 🌿 main | 🏷️ my-session
-🎫 42% | 🔤 50k in / 12k out | ⏱️ 5h: 24%, resets in 2h35m
+Opus | 📁 project | 🌿 main
+🎫 42% | ⏱️ 5h: 24%, resets in 2h35m | 📅 7d: 41%, resets in 3d11h
 ```
 
-**Line 1:** model, directory, git branch, session name (if set via `--name` or `/rename`)
-**Line 2:** context window %, token counts, 5-hour rate limit with countdown — the "resets in" text is a [clickable link](https://claude.ai/settings/usage) in supported terminals (shown only when data is available)
+**Line 1:** model, directory, git branch
+**Line 2:** context window %, 5-hour and 7-day (weekly) rate limits with countdown — the "resets in" text is a [clickable link](https://claude.ai/settings/usage) in supported terminals (shown only when data is available)
 
 ## Benchmark
 
