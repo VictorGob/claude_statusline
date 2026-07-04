@@ -16,23 +16,23 @@
 #define COLOR_RESET  "\033[0m"
 #define STYLE_BOLD   "\033[1m"
 
-/* Format token count as compact string: 50000 -> "50k", 1200000 -> "1.2M" */
-void format_tokens(int tokens, char *buf, size_t buf_size) {
-    if (tokens >= 1000000) {
-        double m = tokens / 1000000.0;
-        if (m >= 10.0)
-            snprintf(buf, buf_size, "%.0fM", m);
-        else
-            snprintf(buf, buf_size, "%.1fM", m);
-    } else if (tokens >= 1000) {
-        double k = tokens / 1000.0;
-        if (k >= 10.0)
-            snprintf(buf, buf_size, "%.0fk", k);
-        else
-            snprintf(buf, buf_size, "%.1fk", k);
-    } else {
-        snprintf(buf, buf_size, "%d", tokens);
-    }
+/* Format "resets in" hyperlinked suffix, e.g. ", resets in 2h30m". Empty if resets_at not set/past. */
+void format_reset_suffix(int64_t resets_at, char *buf, size_t buf_size) {
+    buf[0] = '\0';
+    long remaining = (resets_at > 0) ? (long)(resets_at - (int64_t)time(NULL)) : -1;
+    if (remaining <= 0)
+        return;
+
+    long days = remaining / 86400;
+    long h = (remaining % 86400) / 3600;
+    long m = (remaining % 3600) / 60;
+
+    if (days > 0)
+        snprintf(buf, buf_size, ", \033]8;;https://claude.ai/settings/usage\033\\resets in %ldd%ldh\033]8;;\033\\", days, h);
+    else if (h > 0)
+        snprintf(buf, buf_size, ", \033]8;;https://claude.ai/settings/usage\033\\resets in %ldh%ldm\033]8;;\033\\", h, m);
+    else
+        snprintf(buf, buf_size, ", \033]8;;https://claude.ai/settings/usage\033\\resets in %ldm\033]8;;\033\\", m);
 }
 
 char* read_git_branch(void) {
@@ -109,41 +109,33 @@ int main(void) {
         }
     }
 
-    // Extract session_name (optional, absent if not set)
-    struct json_object *session_name_obj;
-    char session_display[256] = "";
-    if (json_object_object_get_ex(root, "session_name", &session_name_obj)) {
-        const char *sname = json_object_get_string(session_name_obj);
-        if (sname && sname[0] != '\0')
-            snprintf(session_display, sizeof(session_display), " | 🏷️ %s", sname);
-    }
-
     // Extract context_window fields
     struct json_object *context_window_obj;
     struct json_object *tmp;
     double used_pct = -1;
-    int input_tokens = -1, output_tokens = -1;
 
     if (json_object_object_get_ex(root, "context_window", &context_window_obj)) {
         if (json_object_object_get_ex(context_window_obj, "used_percentage", &tmp))
             used_pct = json_object_get_double(tmp);
-        if (json_object_object_get_ex(context_window_obj, "total_input_tokens", &tmp))
-            input_tokens = json_object_get_int(tmp);
-        if (json_object_object_get_ex(context_window_obj, "total_output_tokens", &tmp))
-            output_tokens = json_object_get_int(tmp);
     }
 
-    // Extract rate_limits.five_hour fields
-    struct json_object *rate_limits_obj, *five_hour_obj;
-    double five_hour_pct = -1;
-    int64_t resets_at = -1;
+    // Extract rate_limits.five_hour and rate_limits.seven_day fields
+    struct json_object *rate_limits_obj, *five_hour_obj, *seven_day_obj;
+    double five_hour_pct = -1, seven_day_pct = -1;
+    int64_t five_hour_resets_at = -1, seven_day_resets_at = -1;
 
     if (json_object_object_get_ex(root, "rate_limits", &rate_limits_obj)) {
         if (json_object_object_get_ex(rate_limits_obj, "five_hour", &five_hour_obj)) {
             if (json_object_object_get_ex(five_hour_obj, "used_percentage", &tmp))
                 five_hour_pct = json_object_get_double(tmp);
             if (json_object_object_get_ex(five_hour_obj, "resets_at", &tmp))
-                resets_at = json_object_get_int64(tmp);
+                five_hour_resets_at = json_object_get_int64(tmp);
+        }
+        if (json_object_object_get_ex(rate_limits_obj, "seven_day", &seven_day_obj)) {
+            if (json_object_object_get_ex(seven_day_obj, "used_percentage", &tmp))
+                seven_day_pct = json_object_get_double(tmp);
+            if (json_object_object_get_ex(seven_day_obj, "resets_at", &tmp))
+                seven_day_resets_at = json_object_get_int64(tmp);
         }
     }
 
@@ -154,10 +146,10 @@ int main(void) {
     // Get git branch
     char *git_branch = read_git_branch();
 
-    // Build line 1 into buffer: [Model] 📁 dir | 🌿 branch | 🏷️ session
+    // Build line 1 into buffer: [Model] 📁 dir | 🌿 branch
     char line1[512];
-    snprintf(line1, sizeof(line1), "[" STYLE_BOLD "%s" COLOR_RESET "] 📁 " COLOR_CYAN "%s" COLOR_RESET "%s%s",
-             model_name, dir_basename, git_branch, session_display);
+    snprintf(line1, sizeof(line1), STYLE_BOLD "%s" COLOR_RESET " | 📁 " COLOR_CYAN "%s" COLOR_RESET "%s",
+             model_name, dir_basename, git_branch);
 
     // Build line 2 (only if there's data)
     char line2[512];
@@ -178,16 +170,6 @@ int main(void) {
         has_content = 1;
     }
 
-    if (input_tokens >= 0 && output_tokens >= 0) {
-        char in_buf[32], out_buf[32];
-        format_tokens(input_tokens, in_buf, sizeof(in_buf));
-        format_tokens(output_tokens, out_buf, sizeof(out_buf));
-        if (has_content)
-            pos += snprintf(line2 + pos, sizeof(line2) - pos, " | ");
-        pos += snprintf(line2 + pos, sizeof(line2) - pos, "🔤 %s in / %s out", in_buf, out_buf);
-        has_content = 1;
-    }
-
     if (five_hour_pct >= 0) {
         const char *rl_color = "";
         const char *rl_reset = "";
@@ -201,18 +183,30 @@ int main(void) {
         if (has_content)
             pos += snprintf(line2 + pos, sizeof(line2) - pos, " | ");
 
-        long remaining = (resets_at > 0) ? (long)(resets_at - (int64_t)time(NULL)) : -1;
-        char reset_buf[128] = "";
-        if (remaining > 0) {
-            long h = remaining / 3600;
-            long m = (remaining % 3600) / 60;
-            if (h > 0)
-                snprintf(reset_buf, sizeof(reset_buf), ", \033]8;;https://claude.ai/settings/usage\033\\resets in %ldh%ldm\033]8;;\033\\", h, m);
-            else
-                snprintf(reset_buf, sizeof(reset_buf), ", \033]8;;https://claude.ai/settings/usage\033\\resets in %ldm\033]8;;\033\\", m);
-        }
+        char reset_buf[128];
+        format_reset_suffix(five_hour_resets_at, reset_buf, sizeof(reset_buf));
         pos += snprintf(line2 + pos, sizeof(line2) - pos, "⏱️ 5h: %s%.0f%%%s%s",
                         rl_color, five_hour_pct, rl_reset, reset_buf);
+        has_content = 1;
+    }
+
+    if (seven_day_pct >= 0) {
+        const char *rl_color = "";
+        const char *rl_reset = "";
+        if (seven_day_pct >= 90) {
+            rl_color = COLOR_RED;
+            rl_reset = COLOR_RESET;
+        } else if (seven_day_pct >= 60) {
+            rl_color = COLOR_YELLOW;
+            rl_reset = COLOR_RESET;
+        }
+        if (has_content)
+            pos += snprintf(line2 + pos, sizeof(line2) - pos, " | ");
+
+        char reset_buf[128];
+        format_reset_suffix(seven_day_resets_at, reset_buf, sizeof(reset_buf));
+        pos += snprintf(line2 + pos, sizeof(line2) - pos, "📅 7d: %s%.0f%%%s%s",
+                        rl_color, seven_day_pct, rl_reset, reset_buf);
         has_content = 1;
     }
 
