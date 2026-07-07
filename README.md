@@ -13,8 +13,8 @@ Opus | 📁 project | 🌿 main
 ## Benchmark
 
 ```
-Time (mean ± σ):   4.9 ms ± 0.4 ms   [User: 1.0 ms, System: 0.6 ms]
-Range (min … max): 3.2 ms … 10.1 ms    500 runs   (hyperfine, -O2 -s)
+Time (mean ± σ):   3.0 ms ± 0.8 ms   [User: 1.9 ms, System: 1.0 ms]
+Range (min … max): 0.8 ms … 4.4 ms    1000 runs   (hyperfine, -O2 -s)
 ```
 
 ## Setup
