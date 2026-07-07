@@ -10,7 +10,7 @@ make clean    # remove binary
 make test     # build + run smoke tests
 ```
 
-**Dependency:** `libjson-c-dev` (install via your system package manager).
+**Dependency:** json-c and pkg-config (install via your system package manager: `libjson-c-dev pkg-config` on Ubuntu/Debian, `json-c pkg-config` via Homebrew on macOS). The Makefile resolves json-c's include/lib paths through `pkg-config`, so Homebrew's non-standard prefixes (`/opt/homebrew`, `/usr/local`) work without manual flags.
 
 ## Architecture
 
@@ -41,4 +41,4 @@ All fields are optional; missing fields are silently skipped.
 - **Functions:** `snake_case`
 - **Macros:** `UPPERCASE`
 - **Memory:** Static/stack buffers only — no heap allocation
-- **Compiler flags:** Must compile clean with `-Wall -Wextra -std=c99 -O2 -s`
+- **Compiler flags:** Must compile clean with `-Wall -Wextra -std=c99 -O2` (`-s` is added on Linux only; Apple's linker doesn't support it)

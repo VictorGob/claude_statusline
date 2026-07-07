@@ -1,8 +1,13 @@
-CC = gcc
-CFLAGS = -Wall -Wextra -std=c99 -O2 -s
-LIBS = -ljson-c
+CC = cc
+UNAME_S := $(shell uname -s)
+CFLAGS = -Wall -Wextra -std=c99 -O2 $(shell pkg-config --cflags json-c)
+LIBS = $(shell pkg-config --libs json-c)
 TARGET = claude_statusline
 SRC = main.c
+
+ifeq ($(UNAME_S),Linux)
+CFLAGS += -s
+endif
 
 .PHONY: all clean test
 

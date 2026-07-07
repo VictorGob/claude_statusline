@@ -19,7 +19,7 @@ Range (min … max): 3.2 ms … 10.1 ms    500 runs   (hyperfine, -O2 -s)
 
 ## Setup
 
-**Dependencies:** `libjson-c-dev` (Ubuntu/Debian: `sudo apt-get install libjson-c-dev`, macOS: `brew install json-c`)
+**Dependencies:** json-c and pkg-config (Ubuntu/Debian: `sudo apt-get install libjson-c-dev pkg-config`, macOS: `brew install json-c pkg-config`)
 
 ```bash
 make
