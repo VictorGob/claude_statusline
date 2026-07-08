@@ -1,8 +1,5 @@
-# Compiled binary
-claude_statusline
-
-# Object files
-*.o
+# Build artifacts
+/target
 
 # Claude local configuration
 .claude/

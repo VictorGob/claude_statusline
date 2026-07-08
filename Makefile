@@ -1,23 +1,14 @@
-CC = cc
-UNAME_S := $(shell uname -s)
-CFLAGS = -Wall -Wextra -std=c99 -O2 $(shell pkg-config --cflags json-c)
-LIBS = $(shell pkg-config --libs json-c)
-TARGET = claude_statusline
-SRC = main.c
-
-ifeq ($(UNAME_S),Linux)
-CFLAGS += -s
-endif
+TARGET = target/release/claude_statusline
 
 .PHONY: all clean test
 
 all: $(TARGET)
 
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -o $(TARGET) $(SRC) $(LIBS)
+$(TARGET): Cargo.toml src/main.rs
+	cargo build --release
 
 clean:
-	rm -f $(TARGET)
+	cargo clean
 
 test: $(TARGET)
 	@echo "Testing basic functionality (line 1 only)..."
