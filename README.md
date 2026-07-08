@@ -1,6 +1,6 @@
 # Claude Statusline
 
-A fast C statusline formatter for [Claude Code](https://claude.com/claude-code). Reads JSON from stdin, outputs a two-line ANSI-colored status display.
+A fast Rust statusline formatter for [Claude Code](https://claude.com/claude-code). Reads JSON from stdin, outputs a two-line ANSI-colored status display.
 
 ```
 Opus | 📁 project | 🌿 main
@@ -13,13 +13,13 @@ Opus | 📁 project | 🌿 main
 ## Benchmark
 
 ```
-Time (mean ± σ):   3.0 ms ± 0.8 ms   [User: 1.9 ms, System: 1.0 ms]
-Range (min … max): 0.8 ms … 4.4 ms    1000 runs   (hyperfine, -O2 -s)
+Time (mean ± σ):   3.1 ms ± 1.0 ms   [User: 1.8 ms, System: 1.2 ms]
+Range (min … max): 0.6 ms … 5.0 ms    1000 runs   (hyperfine, cargo build --release, LTO+strip)
 ```
 
 ## Setup
 
-**Dependencies:** json-c and pkg-config (Ubuntu/Debian: `sudo apt-get install libjson-c-dev pkg-config`, macOS: `brew install json-c pkg-config`)
+**Dependencies:** Rust toolchain (install via [rustup](https://rustup.rs))
 
 ```bash
 make
