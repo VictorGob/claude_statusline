@@ -9,6 +9,8 @@ const COLOR_GREEN: &str = "\x1b[32m";
 const COLOR_YELLOW: &str = "\x1b[33m";
 const COLOR_RED: &str = "\x1b[31m";
 const COLOR_CYAN: &str = "\x1b[36m";
+const COLOR_BLUE: &str = "\x1b[34m";
+const COLOR_MAGENTA: &str = "\x1b[35m";
 const COLOR_RESET: &str = "\x1b[0m";
 const STYLE_BOLD: &str = "\x1b[1m";
 
@@ -18,11 +20,17 @@ struct Root {
     workspace: Option<Workspace>,
     context_window: Option<ContextWindow>,
     rate_limits: Option<RateLimits>,
+    effort: Option<Effort>,
 }
 
 #[derive(Deserialize)]
 struct Model {
     display_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Effort {
+    level: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -97,6 +105,18 @@ fn read_git_branch() -> String {
     }
 }
 
+/// Returns the display color for a reasoning effort level.
+fn effort_color(level: &str) -> &'static str {
+    match level {
+        "low" => COLOR_BLUE,
+        "medium" => COLOR_CYAN,
+        "high" => COLOR_GREEN,
+        "xhigh" => COLOR_YELLOW,
+        "max" => COLOR_MAGENTA,
+        _ => COLOR_CYAN,
+    }
+}
+
 /// Returns (color, reset) escape codes for a percentage, matching the C thresholds.
 fn pct_color(pct: f64) -> (&'static str, &'static str) {
     if pct >= 90.0 {
@@ -133,6 +153,8 @@ fn main() {
         .and_then(|w| w.current_dir)
         .unwrap_or_default();
 
+    let effort_level = root.effort.and_then(|e| e.level);
+
     let used_pct = root.context_window.and_then(|c| c.used_percentage);
 
     let (five_hour_pct, five_hour_resets_at) = root
@@ -158,10 +180,23 @@ fn main() {
     // Get git branch
     let git_branch = read_git_branch();
 
-    // Build line 1: [Model] 📁 dir | 🌿 branch
+    // Effort level suffix (e.g. " high"), space-joined with no "|" separator
+    let effort_suffix = match effort_level {
+        Some(level) => format!(" {}{}{}", effort_color(&level), level, COLOR_RESET),
+        None => String::new(),
+    };
+
+    // Build line 1: [Model] effort | 📁 dir | 🌿 branch
     let line1 = format!(
-        "{}{}{} | 📁 {}{}{}{}",
-        STYLE_BOLD, model_name, COLOR_RESET, COLOR_CYAN, dir_basename, COLOR_RESET, git_branch
+        "{}{}{}{} | 📁 {}{}{}{}",
+        STYLE_BOLD,
+        model_name,
+        COLOR_RESET,
+        effort_suffix,
+        COLOR_CYAN,
+        dir_basename,
+        COLOR_RESET,
+        git_branch
     );
 
     // Build line 2 (only if there's data)

@@ -26,6 +26,7 @@ The program parses these fields from the JSON object piped to stdin:
 | Path | Type | Used for |
 |------|------|----------|
 | `model.display_name` | string | Model name in header |
+| `effort.level` | string | Reasoning effort shown after model name (optional; `low`/`medium`/`high`/`xhigh`/`max`, each its own color) |
 | `workspace.current_dir` | string | Directory basename |
 | `context_window.used_percentage` | number | Context % (color-coded) |
 | `rate_limits.five_hour.used_percentage` | number | 5h rate limit used % (color-coded; Pro/Max only) |

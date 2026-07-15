@@ -3,11 +3,11 @@
 A fast Rust statusline formatter for [Claude Code](https://claude.com/claude-code). Reads JSON from stdin, outputs a two-line ANSI-colored status display.
 
 ```
-Opus | 📁 project | 🌿 main
+Opus high | 📁 project | 🌿 main
 🎫 42% | ⏱️ 5h: 24%, resets in 2h35m | 📅 7d: 41%, resets in 3d11h
 ```
 
-**Line 1:** model, directory, git branch
+**Line 1:** model, reasoning effort (color-coded by level, shown when available), directory, git branch
 **Line 2:** context window %, 5-hour and 7-day (weekly) rate limits with countdown — the "resets in" text is a [clickable link](https://claude.ai/settings/usage) in supported terminals (shown only when data is available)
 
 ## Benchmark
