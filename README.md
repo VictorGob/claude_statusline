@@ -10,13 +10,15 @@ Opus high | 📁 project | 🌿 main
 **Line 1:** model, reasoning effort (color-coded by level, shown when available), directory, git branch
 **Line 2:** context window %, 5-hour and 7-day (weekly) rate limits with countdown — the "resets in" text is a [clickable link](https://claude.ai/settings/usage) in supported terminals (shown only when data is available)
 
-**Burn rate:** each quota is 100% per window, so spending is measured against a straight-line budget — 20%/hour for the 5-hour window, 14.3%/day for the weekly one. Outspend it and the window label turns yellow (≥1x budget) then red (≥1.5x), with the icon becoming 🔥 at ≥1.25x. Adds no width, and stays invisible while you're on pace.
+**Burn rate:** the 5-hour quota is 100%, so 20%/hour is a sustainable pace. Spend faster and the `5h` label turns yellow (≥20%/h) then red (≥30%/h), with the ⏱️ icon becoming 🔥 at ≥25%/h. Adds no width, and stays invisible while you're on pace.
 
 ```
 🎫 42% | 🔥 5h: 27%, resets in 4h0m | 📅 7d: 20%, resets in 5d0h
 ```
 
-Both windows are tracked independently — burning through the 5-hour quota doesn't flag the weekly one. The cue is separate from the used-% coloring, which keeps its own thresholds (yellow ≥60%, red ≥90%), so you can tell "used a lot slowly" from "used a little fast".
+The cue is separate from the used-% coloring, which keeps its own thresholds (yellow ≥60%, red ≥90%), so you can tell "used a lot slowly" from "used a little fast".
+
+The weekly window deliberately has no pace cue: a straight-line budget assumes uniform spending, which doesn't hold across a week. A weekday-only pattern would read as 1.4x by Friday while being exactly on track.
 
 ## Benchmark
 

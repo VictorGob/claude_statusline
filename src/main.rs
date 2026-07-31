@@ -6,8 +6,7 @@ const GIT_HEAD_PATH: &str = ".git/HEAD";
 const GIT_REF_PREFIX: &str = "ref: refs/heads/";
 
 const FIVE_HOUR_WINDOW_SECS: i64 = 18000;
-const SEVEN_DAY_WINDOW_SECS: i64 = 604800;
-/// Ignore the first 5% of a window — the average is too noisy to mean anything.
+/// Ignore the first 5% of the window — the average is too noisy to mean anything.
 const BURN_MIN_ELAPSED_FRACTION: f64 = 0.05;
 const BURN_WARN_RATIO: f64 = 1.0;
 const BURN_FIRE_RATIO: f64 = 1.25;
@@ -128,34 +127,38 @@ fn effort_color(level: &str) -> &'static str {
     }
 }
 
-/// Spend pace as a multiple of the window's straight-line budget: 1.0 is exactly on
+/// Spend pace as a multiple of the 5h window's straight-line budget: 1.0 is exactly on
 /// pace, above 1.0 is burning too fast. None if not derivable.
-fn burn_ratio(used_pct: f64, resets_at: Option<i64>, window_secs: i64) -> Option<f64> {
+///
+/// Only the 5h window gets this treatment. A straight-line budget assumes uniform
+/// spending, which holds within a session but not across a week — a weekday-only
+/// pattern reads as 1.4x by Friday while being perfectly on track.
+fn burn_ratio(used_pct: f64, resets_at: Option<i64>) -> Option<f64> {
     let resets_at = match resets_at {
         Some(v) if v > 0 => v,
         _ => return None,
     };
     let remaining = resets_at - now_epoch();
-    if remaining <= 0 || remaining > window_secs {
+    if remaining <= 0 || remaining > FIVE_HOUR_WINDOW_SECS {
         return None;
     }
-    let elapsed = (window_secs - remaining) as f64;
-    if elapsed < window_secs as f64 * BURN_MIN_ELAPSED_FRACTION {
+    let elapsed = (FIVE_HOUR_WINDOW_SECS - remaining) as f64;
+    if elapsed < FIVE_HOUR_WINDOW_SECS as f64 * BURN_MIN_ELAPSED_FRACTION {
         return None;
     }
-    let expected_pct = elapsed / window_secs as f64 * 100.0;
+    let expected_pct = elapsed / FIVE_HOUR_WINDOW_SECS as f64 * 100.0;
     Some(used_pct / expected_pct)
 }
 
-/// Swaps the window's icon for a flame once spending hits 1.25x budget.
-fn burn_icon(ratio: Option<f64>, base: &'static str) -> &'static str {
+/// Swaps the clock for a flame once spending hits 1.25x budget.
+fn burn_icon(ratio: Option<f64>) -> &'static str {
     match ratio {
         Some(r) if r >= BURN_FIRE_RATIO => "🔥",
-        _ => base,
+        _ => "⏱️",
     }
 }
 
-/// Colors the window label only when spending outpaces its budget.
+/// Colors the "5h" label only when spending outpaces its budget.
 fn burn_color(ratio: Option<f64>) -> (&'static str, &'static str) {
     match ratio {
         Some(r) if r >= BURN_HIGH_RATIO => (COLOR_RED, COLOR_RESET),
@@ -258,7 +261,7 @@ fn main() {
 
     if let Some(pct) = five_hour_pct {
         let (color, reset) = pct_color(pct);
-        let ratio = burn_ratio(pct, five_hour_resets_at, FIVE_HOUR_WINDOW_SECS);
+        let ratio = burn_ratio(pct, five_hour_resets_at);
         let (burn, burn_reset) = burn_color(ratio);
         if has_content {
             line2.push_str(" | ");
@@ -266,7 +269,7 @@ fn main() {
         let reset_suffix = format_reset_suffix(five_hour_resets_at);
         line2.push_str(&format!(
             "{} {}5h{}: {}{:.0}%{}{}",
-            burn_icon(ratio, "⏱️"),
+            burn_icon(ratio),
             burn,
             burn_reset,
             color,
@@ -279,21 +282,13 @@ fn main() {
 
     if let Some(pct) = seven_day_pct {
         let (color, reset) = pct_color(pct);
-        let ratio = burn_ratio(pct, seven_day_resets_at, SEVEN_DAY_WINDOW_SECS);
-        let (burn, burn_reset) = burn_color(ratio);
         if has_content {
             line2.push_str(" | ");
         }
         let reset_suffix = format_reset_suffix(seven_day_resets_at);
         line2.push_str(&format!(
-            "{} {}7d{}: {}{:.0}%{}{}",
-            burn_icon(ratio, "📅"),
-            burn,
-            burn_reset,
-            color,
-            pct,
-            reset,
-            reset_suffix
+            "📅 7d: {}{:.0}%{}{}",
+            color, pct, reset, reset_suffix
         ));
         has_content = true;
     }
