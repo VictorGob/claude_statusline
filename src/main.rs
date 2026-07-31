@@ -12,7 +12,7 @@ const BURN_MIN_ELAPSED_FRACTION: f64 = 0.05;
 /// window resets, which is fine. Warning there would be permanently on, and would
 /// flicker as the ratio crossed the threshold between refreshes.
 const BURN_WARN_RATIO: f64 = 1.15;
-const BURN_FIRE_RATIO: f64 = 1.25;
+const BURN_FIRE_RATIO: f64 = 1.4;
 const BURN_HIGH_RATIO: f64 = 1.5;
 
 const COLOR_GREEN: &str = "\x1b[32m";
@@ -153,7 +153,7 @@ fn burn_ratio(used_pct: f64, resets_at: Option<i64>) -> Option<f64> {
     Some(used_pct / expected_pct)
 }
 
-/// Swaps the clock for a flame once spending hits 1.25x budget.
+/// Swaps the clock for a flame once spending hits 1.4x budget.
 fn burn_icon(ratio: Option<f64>) -> &'static str {
     match ratio {
         Some(r) if r >= BURN_FIRE_RATIO => "🔥",

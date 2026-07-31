@@ -27,9 +27,11 @@ test: $(TARGET)
 	@echo '{"model":{"display_name":"Opus"},"effort":{"level":"high"},"workspace":{"current_dir":"/home/user/project"}}' | ./$(TARGET)
 	@echo ""
 	@echo "Testing burn rate over budget (1h elapsed, 35% used = 35%/h)..."
-	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":35,"resets_at":'$$(( $$(date +%s) + 14400 ))'}}}' | ./$(TARGET) | grep -q '🔥' && echo "PASS: flame shown over 25%/h" || echo "FAIL: flame missing"
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":35,"resets_at":'$$(( $$(date +%s) + 14400 ))'}}}' | ./$(TARGET) | grep -q '🔥' && echo "PASS: flame shown over 28%/h" || echo "FAIL: flame missing"
 	@echo "Testing burn rate on budget (1h elapsed, 10% used = 10%/h)..."
-	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":'$$(( $$(date +%s) + 14400 ))'}}}' | ./$(TARGET) | grep -q '🔥' && echo "FAIL: unexpected flame" || echo "PASS: no flame under 25%/h"
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":'$$(( $$(date +%s) + 14400 ))'}}}' | ./$(TARGET) | grep -q '🔥' && echo "FAIL: unexpected flame" || echo "PASS: no flame under 28%/h"
+	@echo "Testing yellow band has no flame (1h elapsed, 27% used = 1.35x)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":27,"resets_at":'$$(( $$(date +%s) + 14400 ))'}}}' | ./$(TARGET) | grep -q '🔥' && echo "FAIL: flame too early in yellow band" || echo "PASS: 27%/h is yellow without flame"
 	@echo "Testing exactly-on-budget does not warn (1h elapsed, 20% used = 20%/h)..."
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":20,"resets_at":'$$(( $$(date +%s) + 14400 ))'}}}' | ./$(TARGET) | grep -q "$$(printf '\033')\[33m" && echo "FAIL: on-budget should not be yellow" || echo "PASS: on-budget stays plain"
 	@echo "Testing over-budget warns (1h elapsed, 24% used = 24%/h)..."
