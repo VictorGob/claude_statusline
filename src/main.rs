@@ -13,7 +13,7 @@ const BURN_MIN_ELAPSED_FRACTION: f64 = 0.05;
 /// flicker as the ratio crossed the threshold between refreshes.
 const BURN_WARN_RATIO: f64 = 1.15;
 const BURN_FIRE_RATIO: f64 = 1.4;
-const BURN_HIGH_RATIO: f64 = 1.5;
+const BURN_HIGH_RATIO: f64 = 1.75;
 
 const COLOR_GREEN: &str = "\x1b[32m";
 const COLOR_YELLOW: &str = "\x1b[33m";
@@ -137,6 +137,14 @@ fn effort_color(level: &str) -> &'static str {
 /// spending, which holds within a session but not across a week — a weekday-only
 /// pattern reads as 1.4x by Friday while being perfectly on track.
 fn burn_ratio(used_pct: f64, resets_at: Option<i64>) -> Option<f64> {
+    let elapsed = window_elapsed_secs(resets_at)?;
+    let expected_pct = elapsed / FIVE_HOUR_WINDOW_SECS as f64 * 100.0;
+    Some(used_pct / expected_pct)
+}
+
+/// Seconds elapsed into the 5h window. None when not derivable: missing/past
+/// resets_at, clock skew, or still inside the noisy opening 5%.
+fn window_elapsed_secs(resets_at: Option<i64>) -> Option<f64> {
     let resets_at = match resets_at {
         Some(v) if v > 0 => v,
         _ => return None,
@@ -149,8 +157,33 @@ fn burn_ratio(used_pct: f64, resets_at: Option<i64>) -> Option<f64> {
     if elapsed < FIVE_HOUR_WINDOW_SECS as f64 * BURN_MIN_ELAPSED_FRACTION {
         return None;
     }
-    let expected_pct = elapsed / FIVE_HOUR_WINDOW_SECS as f64 * 100.0;
-    Some(used_pct / expected_pct)
+    Some(elapsed)
+}
+
+/// ", dry in 1h30m" — the projected exhaustion time at the current average pace,
+/// shown only once the burn ratio hits red. Empty at every other level.
+fn dry_in_suffix(used_pct: f64, resets_at: Option<i64>, ratio: Option<f64>) -> String {
+    match ratio {
+        Some(r) if r >= BURN_HIGH_RATIO => {}
+        _ => return String::new(),
+    }
+    let elapsed = match window_elapsed_secs(resets_at) {
+        Some(e) => e,
+        None => return String::new(),
+    };
+    if used_pct <= 0.0 || used_pct >= 100.0 {
+        return String::new();
+    }
+    // Needing (100 - used) more at used/elapsed per second. At >=1.75x this is always
+    // under 2h51m away, so no days branch is needed.
+    let secs = ((100.0 - used_pct) / used_pct * elapsed) as i64;
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    if h > 0 {
+        format!(", {}dry in {}h{}m{}", COLOR_RED, h, m, COLOR_RESET)
+    } else {
+        format!(", {}dry in {}m{}", COLOR_RED, m, COLOR_RESET)
+    }
 }
 
 /// Swaps the clock for a flame once spending hits 1.4x budget.
@@ -270,15 +303,17 @@ fn main() {
             line2.push_str(" | ");
         }
         let reset_suffix = format_reset_suffix(five_hour_resets_at);
+        let dry_suffix = dry_in_suffix(pct, five_hour_resets_at, ratio);
         line2.push_str(&format!(
-            "{} {}5h{}: {}{:.0}%{}{}",
+            "{} {}5h{}: {}{:.0}%{}{}{}",
             burn_icon(ratio),
             burn,
             burn_reset,
             color,
             pct,
             reset,
-            reset_suffix
+            reset_suffix,
+            dry_suffix
         ));
         has_content = true;
     }
