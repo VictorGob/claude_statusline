@@ -18,6 +18,7 @@ make test     # build + run smoke tests
 - **`statusline.sh`** — Tiny shell wrapper that invokes the release binary (`target/release/claude_statusline`) from the script's directory. Used as the Claude Code statusline command.
 - Git branch is read directly from `.git/HEAD` (no `git` subprocess).
 - JSON is deserialized with `serde`/`serde_json` into structs with `Option<T>` fields — missing fields become `None` automatically.
+- **Burn rate** — the 5h quota is 100%, so 20%/hour is the sustainable pace. Elapsed time is derived as `18000 - (resets_at - now)`, assuming a fixed 5-hour window; `burn_rate()` returns `used_pct / elapsed_hours`. The `5h` label turns yellow at ≥20%/h and red at ≥30%/h, and the ⏱️ icon becomes 🔥 at ≥25%/h. Guards return `None` (no coloring) when `resets_at` is missing/past, when the remaining time exceeds the window, or within the first 15 minutes — where the average is too noisy to be meaningful.
 
 ## JSON Schema (stdin)
 
@@ -30,7 +31,7 @@ The program parses these fields from the JSON object piped to stdin:
 | `workspace.current_dir` | string | Directory basename |
 | `context_window.used_percentage` | number | Context % (color-coded) |
 | `rate_limits.five_hour.used_percentage` | number | 5h rate limit used % (color-coded; Pro/Max only) |
-| `rate_limits.five_hour.resets_at` | int | Unix epoch seconds when 5h window resets (countdown display) |
+| `rate_limits.five_hour.resets_at` | int | Unix epoch seconds when 5h window resets (countdown display; also derives elapsed time for the burn-rate cue on the `5h` label) |
 | `rate_limits.seven_day.used_percentage` | number | 7d (weekly) rate limit used % (color-coded; Pro/Max only) |
 | `rate_limits.seven_day.resets_at` | int | Unix epoch seconds when 7d window resets (countdown display) |
 

@@ -25,3 +25,8 @@ test: $(TARGET)
 	@echo ""
 	@echo "Testing reasoning effort level..."
 	@echo '{"model":{"display_name":"Opus"},"effort":{"level":"high"},"workspace":{"current_dir":"/home/user/project"}}' | ./$(TARGET)
+	@echo ""
+	@echo "Testing burn rate over budget (1h elapsed, 35% used = 35%/h)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":35,"resets_at":'$$(( $$(date +%s) + 14400 ))'}}}' | ./$(TARGET) | grep -q '🔥' && echo "PASS: flame shown over 25%/h" || echo "FAIL: flame missing"
+	@echo "Testing burn rate on budget (1h elapsed, 10% used = 10%/h)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":'$$(( $$(date +%s) + 14400 ))'}}}' | ./$(TARGET) | grep -q '🔥' && echo "FAIL: unexpected flame" || echo "PASS: no flame under 25%/h"

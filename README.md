@@ -10,6 +10,12 @@ Opus high | 📁 project | 🌿 main
 **Line 1:** model, reasoning effort (color-coded by level, shown when available), directory, git branch
 **Line 2:** context window %, 5-hour and 7-day (weekly) rate limits with countdown — the "resets in" text is a [clickable link](https://claude.ai/settings/usage) in supported terminals (shown only when data is available)
 
+**Burn rate:** the 5-hour quota is 100%, so 20%/hour is a sustainable pace. When you spend faster, the `5h` label turns yellow (≥20%/h) then red (≥30%/h), and the ⏱️ icon becomes 🔥 at ≥25%/h — no extra width, and nothing shown while you're on pace.
+
+```
+🎫 42% | 🔥 5h: 27%, resets in 4h0m | 📅 7d: 41%, resets in 3d11h
+```
+
 ## Benchmark
 
 ```
