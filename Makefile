@@ -30,3 +30,7 @@ test: $(TARGET)
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":35,"resets_at":'$$(( $$(date +%s) + 14400 ))'}}}' | ./$(TARGET) | grep -q '🔥' && echo "PASS: flame shown over 25%/h" || echo "FAIL: flame missing"
 	@echo "Testing burn rate on budget (1h elapsed, 10% used = 10%/h)..."
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":'$$(( $$(date +%s) + 14400 ))'}}}' | ./$(TARGET) | grep -q '🔥' && echo "FAIL: unexpected flame" || echo "PASS: no flame under 25%/h"
+	@echo "Testing 7d burn rate over budget (2d elapsed, 45% used = 1.58x)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"seven_day":{"used_percentage":45,"resets_at":'$$(( $$(date +%s) + 432000 ))'}}}' | ./$(TARGET) | grep -q '🔥' && echo "PASS: 7d flame shown over 1.25x" || echo "FAIL: 7d flame missing"
+	@echo "Testing 7d burn rate on budget (2d elapsed, 20% used = 0.70x)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"seven_day":{"used_percentage":20,"resets_at":'$$(( $$(date +%s) + 432000 ))'}}}' | ./$(TARGET) | grep -q '🔥' && echo "FAIL: unexpected 7d flame" || echo "PASS: no 7d flame under 1.25x"
