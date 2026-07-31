@@ -8,7 +8,10 @@ const GIT_REF_PREFIX: &str = "ref: refs/heads/";
 const FIVE_HOUR_WINDOW_SECS: i64 = 18000;
 /// Ignore the first 5% of the window — the average is too noisy to mean anything.
 const BURN_MIN_ELAPSED_FRACTION: f64 = 0.05;
-const BURN_WARN_RATIO: f64 = 1.0;
+/// Deliberately above 1.0: spending exactly on budget lands at 100% right as the
+/// window resets, which is fine. Warning there would be permanently on, and would
+/// flicker as the ratio crossed the threshold between refreshes.
+const BURN_WARN_RATIO: f64 = 1.15;
 const BURN_FIRE_RATIO: f64 = 1.25;
 const BURN_HIGH_RATIO: f64 = 1.5;
 
