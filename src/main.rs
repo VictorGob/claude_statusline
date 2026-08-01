@@ -257,9 +257,9 @@ fn main() {
         .map(|f| (f.used_percentage, f.resets_at))
         .unwrap_or((None, None));
 
-    // Get basename of current directory
+    // Get basename of current directory — current_dir is backslash-delimited on Windows
     let dir_basename = current_dir_full
-        .rsplit('/')
+        .rsplit(|c| c == '/' || c == '\\')
         .next()
         .unwrap_or(&current_dir_full);
 
