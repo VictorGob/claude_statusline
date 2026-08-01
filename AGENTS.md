@@ -10,13 +10,20 @@ make clean    # cargo clean
 make test     # build + run smoke tests
 ```
 
-**Dependency:** Rust toolchain (`rustup`). `serde`/`serde_json` are fetched automatically by Cargo from crates.io — no system packages required.
+`make` is the Unix entry point. **`build.ps1` is its Windows equivalent** — same three targets
+(`.\build.ps1`, `-Clean`, `-Test`), same smoke assertions. The two duplicate the burn-rate
+thresholds, so a change to those in `src/main.rs` has to land in all three files. `build.ps1`
+forces UTF-8 on capture (the flame assertions compare emoji, which a non-UTF-8 console code page
+would mangle) and, unlike the Makefile, exits non-zero when an assertion fails.
+
+**Dependency:** Rust toolchain (`rustup`). `serde`/`serde_json` are fetched automatically by Cargo from crates.io — no system packages required. On Windows the `x86_64-pc-windows-gnu` host needs no Visual Studio: rustup's `rust-mingw` component ships its own `x86_64-w64-mingw32-gcc.exe` and `ld.exe`.
 
 ## Architecture
 
 - **`src/main.rs`** — Single-file Rust program; all logic lives here.
 - **`statusline.sh`** — Tiny shell wrapper that invokes the release binary (`target/release/claude_statusline`) from the script's directory. Used as the Claude Code statusline command.
-- Git branch is read directly from `.git/HEAD` (no `git` subprocess).
+- Git branch is read directly from `.git/HEAD` (no `git` subprocess). The forward slash is fine on Windows — Win32 accepts it — and `str::lines()` strips the CRLF, so the same code path serves both platforms.
+- **Directory basename** splits on `/` *and* `\`: `workspace.current_dir` is backslash-delimited on Windows, so a `'/'`-only split returned the entire path instead of the last component.
 - JSON is deserialized with `serde`/`serde_json` into structs with `Option<T>` fields — missing fields become `None` automatically.
 - **Burn rate (5h window only)** — `burn_ratio()` returns `used_pct / expected_pct`, where `expected_pct` is the straight-line spend for the elapsed fraction of the window. The result is a multiple of budget: `1.0` is exactly on pace, above that is overspending. The `5h` label turns yellow at ≥1.15x and red at ≥1.75x; the ⏱️ icon becomes 🔥 at ≥1.4x — equivalent to 23/28/35 %/hour. The warn threshold sits above 1.0 on purpose: spending exactly on budget lands at 100% just as the window resets, so warning there would be permanently on and would flicker as the ratio crossed the line between refreshes. Red sits at 1.75x rather than higher because red at ratio `r` is unreachable past `5h / r` elapsed (it would need >100% used), so pushing it up shrinks the span of the window in which red can appear at all.
 - **`window_elapsed_secs()`** — shared by `burn_ratio()` and `dry_in_suffix()`. Derives elapsed time as `18000 - (resets_at - now)`, assuming a fixed 5-hour window, and holds all the guards: returns `None` when `resets_at` is missing/past, when remaining time exceeds the window (clock skew), or within the first 5% (15 min), where the average is too noisy to be meaningful. A `None` here means no burn coloring and no projection.
