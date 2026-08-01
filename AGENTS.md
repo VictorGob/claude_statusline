@@ -45,5 +45,5 @@ All fields are optional; missing fields are silently skipped.
 - **Edition:** 2021
 - **Functions/variables:** `snake_case`
 - **Constants:** `UPPERCASE`
-- **Release profile:** `opt-level = 3`, `lto = true`, `strip = true`, `panic = "abort"`, `codegen-units = 1` (see `Cargo.toml`)
+- **Release profile:** `opt-level = "s"`, `lto = true`, `strip = true`, `panic = "abort"`, `codegen-units = 1` (see `Cargo.toml`). Size is preferred over speed on purpose: the program does almost no computation and is spawned fresh on every statusline refresh, so startup dominates and a smaller binary pages in faster. Note ~73% of the binary is irreducible std baseline — an empty `println!` program with this profile is already 305 KB.
 - **Dependencies:** kept minimal — `serde` + `serde_json` only; avoid adding new crates without discussing first
