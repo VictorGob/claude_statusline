@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::io::Read;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const GIT_HEAD_PATH: &str = ".git/HEAD";
@@ -257,10 +258,12 @@ fn main() {
         .map(|f| (f.used_percentage, f.resets_at))
         .unwrap_or((None, None));
 
-    // Get basename of current directory
-    let dir_basename = current_dir_full
-        .rsplit('/')
-        .next()
+    // Get basename of current directory. std::path applies the platform's own separator
+    // rules: on Windows both '\' and '/' split, on Unix only '/', so a Unix filename
+    // containing a backslash survives intact.
+    let dir_basename = Path::new(current_dir_full.as_str())
+        .file_name()
+        .and_then(|n| n.to_str())
         .unwrap_or(&current_dir_full);
 
     // Get git branch

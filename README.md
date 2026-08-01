@@ -39,6 +39,8 @@ Range (min … max): 0.6 ms … 5.0 ms    1000 runs   (hyperfine, cargo build --
 
 **Dependencies:** Rust toolchain (install via [rustup](https://rustup.rs))
 
+### Linux / macOS
+
 ```bash
 make
 ```
@@ -54,11 +56,42 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
+### Windows
+
+`build.ps1` is the PowerShell equivalent of the Makefile, with the same three targets:
+
+```powershell
+.\build.ps1           # build
+.\build.ps1 -Clean    # clean
+.\build.ps1 -Test     # build + smoke tests
+```
+
+Point `settings.json` straight at the binary — `statusline.sh` is bash-only, and invoking the
+executable directly keeps the working directory that the git branch lookup relies on:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "C:/path/to/claude_statusline/target/release/claude_statusline.exe",
+    "padding": 0
+  }
+}
+```
+
+Either Rust toolchain works. `x86_64-pc-windows-gnu` needs no Visual Studio — rustup's
+`rust-mingw` component bundles its own linker, so nothing else has to be installed.
+
 ## Testing
 
 ```bash
-make test
+make test                  # Linux / macOS
 cat input.json | ./statusline.sh
+```
+
+```powershell
+.\build.ps1 -Test          # Windows
+Get-Content input.json | .\target\release\claude_statusline.exe
 ```
 
 ## License
