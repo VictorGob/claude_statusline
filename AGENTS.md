@@ -21,7 +21,8 @@ would mangle) and, unlike the Makefile, exits non-zero when an assertion fails.
 ## Architecture
 
 - **`src/main.rs`** — Single-file Rust program; all logic lives here.
-- **`statusline.sh`** — Tiny shell wrapper that invokes the release binary (`target/release/claude_statusline`) from the script's directory. Used as the Claude Code statusline command.
+- **`statusline.sh`** — Tiny shell wrapper that invokes the release binary (`target/release/claude_statusline`) from the script's directory. Used as the Claude Code statusline command on Unix. There is no Windows counterpart on purpose: `settings.json` needs an absolute path either way, so Windows points straight at `target\release\claude_statusline.exe`, which also leaves the working directory alone — the `.git/HEAD` read below depends on it.
+- **`Makefile` / `build.ps1`** — Build entry points for Unix and Windows respectively. See **Build** above.
 - Git branch is read directly from `.git/HEAD` (no `git` subprocess). The forward slash is fine on Windows — Win32 accepts it — and `str::lines()` strips the CRLF, so the same code path serves both platforms.
 - **Directory basename** comes from `Path::file_name()` rather than a manual split. `workspace.current_dir` is backslash-delimited on Windows, so splitting on `'/'` alone returned the whole path; splitting on both separators unconditionally instead corrupted Unix directories whose *names* contain a backslash (a legal filename character there). `std::path` is compiled per-target and applies the right rule on each — `\` and `/` on Windows, only `/` on Unix — and handles a trailing separator, which the manual split rendered as an empty basename.
 - JSON is deserialized with `serde`/`serde_json` into structs with `Option<T>` fields — missing fields become `None` automatically.
