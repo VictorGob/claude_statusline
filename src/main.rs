@@ -361,7 +361,35 @@ fn pct_color(pct: f64) -> (&'static str, &'static str) {
     }
 }
 
+/// `claude_statusline 0.1.0 (0f06173)`, with `-dirty` when built from an edited tree and
+/// `unknown` when built outside a git checkout. GIT_SHA is captured at compile time by
+/// build.rs, so it names the commit the binary was *built* from.
+fn print_version() {
+    println!(
+        "{} {} ({})",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_SHA")
+    );
+}
+
 fn main() {
+    // Before the stdin read, not after: --version run from a terminal has no pipe feeding
+    // it, so reading first would block forever instead of printing. Any other argument
+    // falls through and is ignored, so a future Claude Code that passes one still renders.
+    //
+    // args_os, not args: args() panics on an argument that isn't valid UTF-8, and with
+    // panic="abort" that renders no status line at all rather than ignoring the argument
+    // as the line above promises. OsStr implements PartialEq<str>, so the comparison stays
+    // direct with no lossy conversion. Reachable on Unix, where argv is raw bytes; on
+    // Windows argv arrives as UTF-16 and invalid means an unpaired surrogate, which is why
+    // there is no smoke assertion for this (see AGENTS.md).
+    if matches!(std::env::args_os().nth(1).as_deref(),
+                Some(arg) if arg == "--version" || arg == "-V") {
+        print_version();
+        return;
+    }
+
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() {
         eprintln!("Error: Failed to read stdin");

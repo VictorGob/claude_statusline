@@ -77,8 +77,31 @@ from `strace -c` and are the more trustworthy figure — they're deterministic, 
 wall-clock on a scaling CPU is not. `hyperfine` was tried first and gave results varying ~10x for a
 byte-identical binary depending on run order, so don't reach for it here.
 
-`opt-level` made no measurable difference either way; `3` and `"s"` both land at ~750 µs. This
-program is startup-bound, not compute-bound — there's no hot loop for the optimizer to reach.
+On Linux `opt-level` made no measurable difference either way; `3` and `"s"` both land at ~750 µs.
+This program is startup-bound, not compute-bound — there's no hot loop for the optimizer to reach.
+
+### Windows
+
+Windows has no equivalent win available, because there's almost nothing left to win:
+
+```
+                        per spawn
+empty `fn main() {}`      4.41 ms
+full statusline           4.61 ms
+```
+
+**About 96% of a launch is `CreateProcess`.** Everything the program does — read stdin, parse the
+JSON, read `.git/HEAD`, format, print — fits in the remaining ~200 µs, and that is the entire
+budget any change competes for.
+
+So the build ships `opt-level = "z"`, and that is a *speed* setting here rather than a size one:
+the image is mapped on every spawn, so the smallest binary starts fastest. It measures ~1.7%
+faster than `opt-level = 3` and is neutral on Linux. Static linking, which is what actually made
+the Linux build fast, has no counterpart — `msvcrt.dll` is imported either way, so unlike Linux
+there is no loader work to remove.
+
+Anything that sounds like it should help here probably doesn't; `AGENTS.md` lists what was tried
+and rejected, with the numbers, so it isn't re-derived.
 
 ## Setup
 
@@ -131,6 +154,27 @@ executable directly keeps the working directory that the git branch lookup relie
 
 Either Rust toolchain works. `x86_64-pc-windows-gnu` needs no Visual Studio — rustup's
 `rust-mingw` component bundles its own linker, so nothing else has to be installed.
+
+## Version
+
+```console
+$ claude_statusline --version
+claude_statusline 0.1.0 (0f06173)
+```
+
+`-V` is an alias. The SHA is the commit that was checked out **when the binary was built**, which
+is what tells you whether the statusline you're running matches the code you have — the tool is
+built locally, so a `git pull` and a rebuild move it forward on their own. Two things it will
+tell you rather than hide:
+
+```
+claude_statusline 0.1.0 (0f06173-dirty)   built from a tree with uncommitted changes
+claude_statusline 0.1.0 (unknown)         built outside a git checkout, or without git
+```
+
+Every other argument is ignored and the statusline renders as normal, so nothing breaks if Claude
+Code ever passes one. On Unix the wrapper forwards arguments too, so `./statusline.sh --version`
+works the same way.
 
 ## Testing
 

@@ -8,8 +8,10 @@ all: $(TARGET)
 # On Linux, link libc statically: it removes the dynamic loader's symbol resolution
 # from every spawn, which is where this program's runtime actually goes. Measured at
 # ~750us -> ~555us (~26% faster startup) and 81 -> 49 syscalls. opt-level alone moved
-# nothing, since there is no hot loop here to optimize. Note hyperfine is unreliable
-# at this timescale on a scaling CPU; see the benchmarking note in AGENTS.md.
+# nothing *on Linux*, since there is no hot loop here to optimize -- but it is not inert
+# everywhere: Cargo.toml sets opt-level="z" for a measured startup win on Windows, where
+# the image is mapped on every spawn. Note hyperfine is unreliable at this timescale on a
+# scaling CPU; see the benchmarking note in AGENTS.md.
 #
 # The explicit --target is required, not cosmetic: without it RUSTFLAGS also reaches
 # serde_derive, and a proc-macro cannot be built as a static lib ("does not support
@@ -21,7 +23,7 @@ all: $(TARGET)
 # report success while producing an ordinary dynamic binary. target-cpu=native is
 # deliberately not used anywhere: it buys nothing measurable on this workload and
 # makes the binary SIGILL on older CPUs.
-$(TARGET): Cargo.toml src/main.rs
+$(TARGET): Cargo.toml src/main.rs build.rs
 	@if [ "$$(uname -s)" = "Linux" ] && [ -n "$(TRIPLE)" ] && \
 	    RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target $(TRIPLE) 2>/dev/null && \
 	    echo '{}' | ./target/$(TRIPLE)/release/claude_statusline >/dev/null 2>&1; then \
@@ -85,3 +87,14 @@ test: $(TARGET)
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":600000,"total_api_duration_ms":120000}}' | ./$(TARGET) | grep -q '⚡' && echo "FAIL: activity meaningless under 1h" || echo "PASS: no activity cue under 1h"
 	@echo "Testing activity clamps at 100% (parallel subagents sum past wall clock)..."
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":7200000,"total_api_duration_ms":18000000}}' | ./$(TARGET) | grep -q '⚡100%' && echo "PASS: activity clamped to 100%" || echo "FAIL: activity exceeded 100%"
+	@echo ""
+	@echo "Testing --version prints name, semver and build SHA..."
+	@./$(TARGET) --version | grep -qE '^claude_statusline [0-9]+\.[0-9]+\.[0-9]+ \(.+\)$$' && echo "PASS: version format" || echo "FAIL: bad version format"
+	@echo "Testing -V matches --version..."
+	@[ "$$(./$(TARGET) --version)" = "$$(./$(TARGET) -V)" ] && echo "PASS: -V is an alias" || echo "FAIL: -V differs from --version"
+	@echo "Testing --version exits 0..."
+	@./$(TARGET) --version >/dev/null 2>&1 && echo "PASS: exit 0" || echo "FAIL: non-zero exit"
+	@echo "Testing --version returns with no stdin attached (must not block)..."
+	@./$(TARGET) --version </dev/null >/dev/null 2>&1 && echo "PASS: no stdin needed" || echo "FAIL: --version failed without stdin"
+	@echo "Testing an unrecognized argument still renders a statusline..."
+	@[ "$$(echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | ./$(TARGET) --not-a-flag)" = "$$(echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | ./$(TARGET))" ] && echo "PASS: unknown arg ignored" || echo "FAIL: unknown arg changed the output"

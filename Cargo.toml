@@ -8,7 +8,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [profile.release]
-opt-level = 3
+# "z", not 3, *for speed* -- see the release-profile note in AGENTS.md. This program is
+# loader-bound, not compute-bound: on Windows the image size is paid on every spawn, so
+# the smallest binary starts fastest. Measured ~1.7% faster than opt-level 3, consistent
+# in 16/16 alternating rounds. Neutral on Linux, where opt-level moves nothing.
+opt-level = "z"
 lto = true
 strip = true
 panic = "abort"
