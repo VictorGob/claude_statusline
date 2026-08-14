@@ -156,6 +156,57 @@ function Invoke-Test {
         -Needle "$([char]0xD83D)$([char]0xDD25)" -ShouldContain $false `
         -PassMessage "7d has no pace cue" -FailMessage "7d should not flag pace"
 
+    # Code points, not literals, matching the flame assertions above — they all rely
+    # on the UTF-8 capture forced at the top of this file. 💾 is astral so it needs a
+    # surrogate pair; ⏳ and ⚡ are BMP and take a single char.
+    $Floppy = "$([char]0xD83D)$([char]0xDCBE)"
+    $Hourglass = "$([char]0x23F3)"
+    $Bolt = "$([char]0x26A1)"
+
+    Write-Host "Testing healthy cache ratio is uncolored (60% context, 95k read / 5k write)..."
+    Assert-Output `
+        -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":60,"current_usage":{"cache_read_input_tokens":95000,"cache_creation_input_tokens":5000}}}' `
+        -Needle "| $Floppy 95%" -ShouldContain $true `
+        -PassMessage "cache 95% shown plain" -FailMessage "cache ratio missing or colored"
+
+    Write-Host "Testing cache miss is red (60% context, 20k read / 80k write)..."
+    Assert-Output `
+        -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":60,"current_usage":{"cache_read_input_tokens":20000,"cache_creation_input_tokens":80000}}}' `
+        -Needle "$ESC[31m$Floppy 20%" -ShouldContain $true `
+        -PassMessage "red at 20% hit rate" -FailMessage "missing red on cache miss"
+
+    Write-Host "Testing cache indicator hidden below the context floor (10% context)..."
+    Assert-Output `
+        -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":10,"current_usage":{"cache_read_input_tokens":20000,"cache_creation_input_tokens":80000}}}' `
+        -Needle $Floppy -ShouldContain $false `
+        -PassMessage "no cache cue under 30% context" -FailMessage "cold start should not flag a miss"
+
+    Write-Host "Testing cache indicator hidden when current_usage is null (post-/compact)..."
+    Assert-Output `
+        -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":60,"current_usage":null}}' `
+        -Needle $Floppy -ShouldContain $false `
+        -PassMessage "no cache cue without usage" -FailMessage "null usage should render nothing"
+
+    Write-Host "Testing session age warns and shows activity (5h02m wall, 5m API)..."
+    $longSession = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":18120000,"total_api_duration_ms":300000}}'
+    Assert-Output -Json $longSession -Needle "$ESC[33m5h02m" -ShouldContain $true `
+        -PassMessage "yellow age past 4h" -FailMessage "missing yellow age"
+    Assert-Output -Json $longSession -Needle "${Bolt}2%" -ShouldContain $true `
+        -PassMessage "activity shown on long session" -FailMessage "activity missing"
+
+    Write-Host "Testing a short session shows age but no activity (10m wall)..."
+    $shortSession = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":600000,"total_api_duration_ms":120000}}'
+    Assert-Output -Json $shortSession -Needle "$Hourglass 10m" -ShouldContain $true `
+        -PassMessage "10m age shown plain" -FailMessage "age missing"
+    Assert-Output -Json $shortSession -Needle $Bolt -ShouldContain $false `
+        -PassMessage "no activity cue under 1h" -FailMessage "activity meaningless under 1h"
+
+    Write-Host "Testing activity clamps at 100% (parallel subagents sum past wall clock)..."
+    Assert-Output `
+        -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":7200000,"total_api_duration_ms":18000000}}' `
+        -Needle "${Bolt}100%" -ShouldContain $true `
+        -PassMessage "activity clamped to 100%" -FailMessage "activity exceeded 100%"
+
     Write-Host ""
     if ($script:Failures -gt 0) {
         # Unlike the Makefile, a failing assertion fails the run.
