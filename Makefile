@@ -37,7 +37,12 @@ $(TARGET): Cargo.toml src/main.rs build.rs
 clean:
 	cargo clean
 
+# Unit tests first: they cover the threshold boundaries the smoke assertions below can
+# only sample, and they fail in milliseconds without spawning a process per case.
 test: $(TARGET)
+	@echo "Running unit tests..."
+	cargo test --quiet
+	@echo ""
 	@echo "Testing basic functionality (line 1 only)..."
 	@echo '{"model":{"display_name":"Claude 3.5 Sonnet"},"workspace":{"current_dir":"/home/user/my-project"}}' | ./$(TARGET)
 	@echo ""

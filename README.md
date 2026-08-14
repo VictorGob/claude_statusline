@@ -16,6 +16,18 @@ The branch name is cut to 40 characters with a trailing `…`. It's the one fiel
 🌿 feature/PROJ-1482/limit-git-branch-leng…
 ```
 
+On a detached HEAD there's no branch name to show, so it falls back to the short commit id
+rather than going blank — which would leave the line quietest exactly when you're least sure
+where you are. The `@` marks it as a commit rather than a branch that happens to be named
+like hex:
+
+```
+🌿 @8d879d1
+```
+
+In a git worktree or submodule the branch is omitted entirely: `.git` is a file holding a
+pointer there rather than a directory, and following it isn't implemented.
+
 **Burn rate:** the 5-hour quota is 100%, so 20%/hour is a sustainable pace. Overspend it and the `5h` label turns yellow (≥23%/h) then red (≥35%/h), with the ⏱️ icon becoming 🔥 at ≥28%/h. Stays invisible while you're on pace.
 
 Warnings start at 23%/h rather than 20%/h so that spending exactly on budget — which lands at 100% right as the window resets — doesn't sit permanently yellow.
@@ -187,6 +199,15 @@ cat input.json | ./statusline.sh
 .\build.ps1 -Test          # Windows
 Get-Content input.json | .\target\release\claude_statusline.exe
 ```
+
+Both entry points run the same two layers. `cargo test` covers the threshold and formatting
+logic — each colour band is asserted on *both* sides of its boundary, since a test at a
+comfortable midpoint passes just as happily with the constant moved. The smoke assertions
+then run the real binary end to end, checking the ANSI output, the `.git/HEAD` read, and
+`--version`, which unit tests can't reach.
+
+`cargo test` alone is the fast loop while changing thresholds — no release build, no process
+per case.
 
 ## License
 

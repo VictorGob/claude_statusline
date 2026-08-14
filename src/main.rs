@@ -558,3 +558,199 @@ fn main() {
         println!("{}", line2);
     }
 }
+
+/// Unit tests for the threshold and formatting logic.
+///
+/// These exist because the Makefile / build.ps1 smoke suites cannot do two things: pin a
+/// threshold's *exact* boundary (they assert a comfortable midpoint, so a constant could
+/// drift some way before any of them notices), and run deterministically (they derive
+/// `resets_at` from the wall clock). Both suites still matter — they test the real binary
+/// end to end, including the ANSI output and the `.git/HEAD` read this module skips.
+///
+/// Compiled out of the release build, so none of this reaches the binary.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both sides of every threshold. A test at a comfortable midpoint passes just as
+    /// happily with the constant moved, which makes it worthless for catching drift.
+    #[test]
+    fn pct_color_boundaries() {
+        assert_eq!(pct_color(59.9).0, "");
+        assert_eq!(pct_color(60.0).0, COLOR_YELLOW);
+        assert_eq!(pct_color(89.9).0, COLOR_YELLOW);
+        assert_eq!(pct_color(90.0).0, COLOR_RED);
+    }
+
+    /// Inverted against every other indicator here: high is good.
+    #[test]
+    fn cache_color_boundaries() {
+        assert_eq!(cache_color(0.85).0, "", "at/above warn ratio is plain");
+        assert_eq!(cache_color(0.849).0, COLOR_YELLOW);
+        assert_eq!(cache_color(0.60).0, COLOR_YELLOW, "exactly at high ratio");
+        assert_eq!(cache_color(0.599).0, COLOR_RED);
+    }
+
+    #[test]
+    fn burn_color_boundaries() {
+        assert_eq!(burn_color(None).0, "", "no ratio means no cue");
+        assert_eq!(burn_color(Some(1.149)).0, "");
+        assert_eq!(burn_color(Some(BURN_WARN_RATIO)).0, COLOR_YELLOW);
+        assert_eq!(burn_color(Some(1.749)).0, COLOR_YELLOW);
+        assert_eq!(burn_color(Some(BURN_HIGH_RATIO)).0, COLOR_RED);
+    }
+
+    /// The flame sits at its own threshold, between warn and red, so it needs its own
+    /// test — a yellow label with no flame is a real, intended state.
+    #[test]
+    fn burn_icon_threshold_is_independent_of_color() {
+        assert_eq!(burn_icon(None), "⏱️");
+        assert_eq!(burn_icon(Some(1.399)), "⏱️");
+        assert_eq!(burn_icon(Some(BURN_FIRE_RATIO)), "🔥");
+        assert_eq!(
+            burn_color(Some(1.399)).0,
+            COLOR_YELLOW,
+            "yellow but not yet flaming"
+        );
+    }
+
+    fn usage(read: Option<u64>, created: Option<u64>) -> CurrentUsage {
+        CurrentUsage {
+            cache_read_input_tokens: read,
+            cache_creation_input_tokens: created,
+        }
+    }
+
+    #[test]
+    fn cache_hit_ratio_handles_missing_and_empty() {
+        let ratio = cache_hit_ratio(&usage(Some(80000), Some(3150))).unwrap();
+        assert!((ratio - 0.9621).abs() < 0.001, "got {}", ratio);
+        assert_eq!(cache_hit_ratio(&usage(Some(0), Some(0))), None, "no tokens");
+        assert_eq!(cache_hit_ratio(&usage(None, Some(10))), None, "no read field");
+        assert_eq!(cache_hit_ratio(&usage(Some(10), None)), None, "no write field");
+    }
+
+    /// The floor exists so a cold start — all cache writes by construction — doesn't sit
+    /// red at the top of every session.
+    #[test]
+    fn cache_suffix_respects_the_context_floor() {
+        let u = usage(Some(20000), Some(80000));
+        assert_eq!(cache_suffix(Some(29.9), Some(&u)), "");
+        assert!(cache_suffix(Some(CACHE_MIN_CONTEXT_PCT), Some(&u)).contains("💾"));
+        assert_eq!(cache_suffix(None, Some(&u)), "", "no context reading");
+        assert_eq!(cache_suffix(Some(60.0), None), "", "post-/compact null usage");
+    }
+
+    #[test]
+    fn format_age_branches() {
+        assert_eq!(format_age(0), "0m");
+        assert_eq!(format_age(60), "1m");
+        assert_eq!(format_age(3600), "1h00m", "minutes are zero-padded");
+        assert_eq!(format_age(18120), "5h02m");
+        assert_eq!(format_age(86400), "1d0h", "day branch drops minutes");
+        assert_eq!(format_age(90000), "1d1h");
+    }
+
+    fn cost(total_ms: Option<u64>, api_ms: Option<u64>) -> Cost {
+        Cost {
+            total_duration_ms: total_ms,
+            total_api_duration_ms: api_ms,
+        }
+    }
+
+    #[test]
+    fn session_suffix_age_and_activity_gates() {
+        assert_eq!(session_suffix(&cost(Some(59_000), None)), "", "under a minute");
+        assert!(session_suffix(&cost(Some(60_000), None)).contains("⏳"));
+
+        // The activity share is meaningless on a short session, so it stays hidden.
+        let short = session_suffix(&cost(Some(600_000), Some(120_000)));
+        assert!(short.contains("⏳ 10m") && !short.contains("⚡"));
+        assert!(session_suffix(&cost(Some(3_600_000), Some(120_000))).contains("⚡"));
+    }
+
+    /// Needs *both* conditions: a low active share only means something once the session
+    /// has been open long enough for the idling to have cost anything.
+    #[test]
+    fn session_suffix_activity_warns_only_when_old_and_idle() {
+        let old_idle = session_suffix(&cost(Some(18_120_000), Some(300_000)));
+        assert!(old_idle.contains("⚡2%") && old_idle.contains(COLOR_YELLOW));
+
+        // Old but busy: the age still colours, so check the activity segment itself is
+        // plain — a bare space before the bolt means no escape was emitted.
+        let old_busy = session_suffix(&cost(Some(18_120_000), Some(18_000_000)));
+        assert!(old_busy.contains(" ⚡99%"), "busy session, uncoloured: {}", old_busy);
+
+        // Parallel subagents sum past wall clock; 100% is the honest ceiling.
+        let parallel = session_suffix(&cost(Some(7_200_000), Some(18_000_000)));
+        assert!(parallel.contains("⚡100%"), "clamped, not 250%: {}", parallel);
+
+        // Young and idle: under AGE_WARN_SECS the share is shown but never coloured.
+        let young_idle = session_suffix(&cost(Some(3_600_000), Some(1_000)));
+        assert!(young_idle.contains("⚡0%") && !young_idle.contains(COLOR_YELLOW));
+    }
+
+    #[test]
+    fn effort_levels_are_distinct() {
+        let levels = ["low", "medium", "high", "xhigh", "max"];
+        let colors: Vec<&str> = levels.iter().map(|l| effort_color(l)).collect();
+        for (i, a) in colors.iter().enumerate() {
+            for (j, b) in colors.iter().enumerate() {
+                assert!(i == j || a != b, "{} and {} share a color", levels[i], levels[j]);
+            }
+        }
+        assert_eq!(effort_color("something-new"), COLOR_CYAN, "unknown falls back");
+    }
+
+    // --- Clock-dependent -----------------------------------------------------------
+    // These read now_epoch() internally, so inputs are derived from it and compared with
+    // a tolerance: a second can tick between the test computing `now` and the function
+    // reading it, which would make exact equality flaky.
+
+    fn resets_in(secs: i64) -> Option<i64> {
+        Some(now_epoch().expect("system clock readable in tests") + secs)
+    }
+
+    #[test]
+    fn window_elapsed_guards() {
+        assert_eq!(window_elapsed_secs(None), None, "missing resets_at");
+        assert_eq!(window_elapsed_secs(Some(0)), None, "zero is not a timestamp");
+        assert_eq!(window_elapsed_secs(resets_in(-60)), None, "already past");
+        assert_eq!(
+            window_elapsed_secs(resets_in(FIVE_HOUR_WINDOW_SECS + 600)),
+            None,
+            "remaining beyond the window means clock skew"
+        );
+        assert_eq!(
+            window_elapsed_secs(resets_in(FIVE_HOUR_WINDOW_SECS - 60)),
+            None,
+            "inside the noisy opening 5%"
+        );
+        let elapsed = window_elapsed_secs(resets_in(14400)).expect("1h in is derivable");
+        assert!((elapsed - 3600.0).abs() < 5.0, "got {}", elapsed);
+    }
+
+    /// 1h into the window is 20% of the budget, so 24% used is 1.2x.
+    #[test]
+    fn burn_ratio_is_a_multiple_of_budget() {
+        let ratio = burn_ratio(24.0, resets_in(14400)).expect("derivable");
+        assert!((ratio - 1.2).abs() < 0.01, "got {}", ratio);
+
+        let on_pace = burn_ratio(20.0, resets_in(14400)).expect("derivable");
+        assert!((on_pace - 1.0).abs() < 0.01, "exactly on budget");
+        assert_eq!(burn_color(Some(on_pace)).0, "", "on budget must not warn");
+
+        assert_eq!(burn_ratio(50.0, None), None, "no window, no ratio");
+    }
+
+    /// Confined to red so line 2 keeps its usual width at every other level.
+    #[test]
+    fn dry_in_only_appears_at_red() {
+        let at = resets_in(14400);
+        assert_eq!(dry_in_suffix(30.0, at, Some(1.5)), "", "yellow stays quiet");
+        assert_eq!(dry_in_suffix(40.0, at, None), "", "no ratio, no projection");
+        assert!(dry_in_suffix(40.0, at, Some(2.0)).contains("dry in"));
+        assert_eq!(dry_in_suffix(0.0, at, Some(2.0)), "", "nothing used yet");
+        assert_eq!(dry_in_suffix(100.0, at, Some(2.0)), "", "already dry");
+    }
+}

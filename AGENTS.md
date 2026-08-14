@@ -7,7 +7,7 @@ Rust statusline formatter for Claude Code. Reads JSON from stdin (piped by Claud
 ```bash
 make          # cargo build --release
 make clean    # cargo clean
-make test     # build + run smoke tests
+make test     # build + cargo test + smoke tests
 ```
 
 `make` is the Unix entry point. **`build.ps1` is its Windows equivalent** — same three targets
@@ -16,6 +16,28 @@ make test     # build + run smoke tests
 them has to land in all three files. `build.ps1` forces UTF-8 on capture (several assertions
 compare emoji, which a non-UTF-8 console code page would mangle) and, unlike the Makefile, exits
 non-zero when an assertion fails.
+
+**Testing is two layers, and both entry points run both.** `cargo test` (a `#[cfg(test)] mod
+tests` at the foot of `src/main.rs`) covers the threshold and formatting logic; the smoke
+assertions then exercise the real binary end to end. They are complements, not duplicates —
+each reaches what the other cannot:
+
+- **Unit tests** assert every colour band on *both* sides of its boundary. The smoke suites can
+  only sample a comfortable midpoint, so a constant could drift a long way before any of them
+  noticed. They are also deterministic, where the smoke assertions derive `resets_at` from the
+  wall clock. Anything clock-dependent (`burn_ratio`, `window_elapsed_secs`, `dry_in_suffix`)
+  is asserted **with a tolerance**, never exact equality — a second can tick between the test
+  computing `now` and the function reading it.
+- **Smoke assertions** cover what a unit test cannot reach: the assembled ANSI output, the
+  `.git/HEAD` read (via throwaway directories holding a synthetic HEAD), `--version`, and the
+  no-stdin blocking case.
+
+They run first because they fail in milliseconds without spawning a process per case. Note that
+**a threshold test must be verified to fail** when the constant moves — nudge the constant, watch
+it fail, revert. A boundary test that passes under a changed boundary is worthless. Beware also
+that on Windows a rapid file restore can leave `cargo` fingerprinting a stale artifact, so a
+"still failing after revert" result may be the incremental build, not the code; `rm -rf
+target/debug` settles it.
 
 **The build *rules* are a deliberate exception to that parity.** The Makefile statically links
 libc on Linux (see below); `build.ps1` runs a plain `cargo build --release` and takes only what

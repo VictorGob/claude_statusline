@@ -132,6 +132,17 @@ function Assert-Output {
 }
 
 function Invoke-Test {
+    # Unit tests first: they cover the threshold boundaries the smoke assertions below can
+    # only sample, and they fail in milliseconds without spawning a process per case.
+    Write-Host "Running unit tests..."
+    $cargo = Get-Cargo
+    & $cargo test --quiet --manifest-path (Join-Path $RepoRoot "Cargo.toml")
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "FAIL: unit tests failed."
+        exit 1
+    }
+    Write-Host ""
+
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $in1h = $now + 14400    # 1h elapsed into the 5h window
     $in2h30 = $now + 9000
