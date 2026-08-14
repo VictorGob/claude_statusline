@@ -10,6 +10,12 @@ Opus high | 📁 project | 🌿 main | ⏳ 2h15m ⚡16%
 **Line 1:** model, reasoning effort (color-coded by level, shown when available), directory, git branch, session age and active share
 **Line 2:** context window %, cache hit ratio, 5-hour and 7-day (weekly) rate limits with countdown — the "resets in" text is a [clickable link](https://claude.ai/settings/usage) in supported terminals (shown only when data is available)
 
+The branch name is cut to 40 characters with a trailing `…`. It's the one field with no natural bound, and it sits ahead of the session indicators, so a long ticket-style branch would otherwise push `⏳` and `⚡` off the right edge of a narrow terminal. The tail is what goes, since the head is where the ticket id lives:
+
+```
+🌿 feature/PROJ-1482/limit-git-branch-leng…
+```
+
 **Burn rate:** the 5-hour quota is 100%, so 20%/hour is a sustainable pace. Overspend it and the `5h` label turns yellow (≥23%/h) then red (≥35%/h), with the ⏱️ icon becoming 🔥 at ≥28%/h. Stays invisible while you're on pace.
 
 Warnings start at 23%/h rather than 20%/h so that spending exactly on budget — which lands at 100% right as the window resets — doesn't sit permanently yellow.
