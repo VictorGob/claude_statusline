@@ -117,7 +117,9 @@ and rejected, with the numbers, so it isn't re-derived.
 
 ## Setup
 
-**Dependencies:** Rust toolchain (install via [rustup](https://rustup.rs))
+**Dependencies:** Rust toolchain (install via [rustup](https://rustup.rs)). `git` is used at
+*build* time to stamp the commit id into `--version`; without it the build still succeeds and
+reports `(unknown)`. The program itself never shells out to git — it reads `.git/HEAD` directly.
 
 ### Linux / macOS
 
@@ -148,7 +150,7 @@ Add to `~/.claude/settings.json`:
 ```powershell
 .\build.ps1           # build
 .\build.ps1 -Clean    # clean
-.\build.ps1 -Test     # build + smoke tests
+.\build.ps1 -Test     # build + cargo test + smoke tests
 ```
 
 Point `settings.json` straight at the binary — `statusline.sh` is bash-only, and invoking the
