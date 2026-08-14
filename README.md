@@ -16,6 +16,18 @@ The branch name is cut to 40 characters with a trailing `…`. It's the one fiel
 🌿 feature/PROJ-1482/limit-git-branch-leng…
 ```
 
+On a detached HEAD there's no branch name to show, so it falls back to the short commit id
+rather than going blank — which would leave the line quietest exactly when you're least sure
+where you are. The `@` marks it as a commit rather than a branch that happens to be named
+like hex:
+
+```
+🌿 @8d879d1
+```
+
+In a git worktree or submodule the branch is omitted entirely: `.git` is a file holding a
+pointer there rather than a directory, and following it isn't implemented.
+
 **Burn rate:** the 5-hour quota is 100%, so 20%/hour is a sustainable pace. Overspend it and the `5h` label turns yellow (≥23%/h) then red (≥35%/h), with the ⏱️ icon becoming 🔥 at ≥28%/h. Stays invisible while you're on pace.
 
 Warnings start at 23%/h rather than 20%/h so that spending exactly on budget — which lands at 100% right as the window resets — doesn't sit permanently yellow.
@@ -159,7 +171,7 @@ Either Rust toolchain works. `x86_64-pc-windows-gnu` needs no Visual Studio — 
 
 ```console
 $ claude_statusline --version
-claude_statusline 0.1.0 (0f06173)
+claude_statusline 0.2.0 (8d879d1)
 ```
 
 `-V` is an alias. The SHA is the commit that was checked out **when the binary was built**, which
@@ -168,8 +180,8 @@ built locally, so a `git pull` and a rebuild move it forward on their own. Two t
 tell you rather than hide:
 
 ```
-claude_statusline 0.1.0 (0f06173-dirty)   built from a tree with uncommitted changes
-claude_statusline 0.1.0 (unknown)         built outside a git checkout, or without git
+claude_statusline 0.2.0 (8d879d1-dirty)   built from a tree with uncommitted changes
+claude_statusline 0.2.0 (unknown)         built outside a git checkout, or without git
 ```
 
 Every other argument is ignored and the statusline renders as normal, so nothing breaks if Claude
@@ -187,6 +199,15 @@ cat input.json | ./statusline.sh
 .\build.ps1 -Test          # Windows
 Get-Content input.json | .\target\release\claude_statusline.exe
 ```
+
+Both entry points run the same two layers. `cargo test` covers the threshold and formatting
+logic — each colour band is asserted on *both* sides of its boundary, since a test at a
+comfortable midpoint passes just as happily with the constant moved. The smoke assertions
+then run the real binary end to end, checking the ANSI output, the `.git/HEAD` read, and
+`--version`, which unit tests can't reach.
+
+`cargo test` alone is the fast loop while changing thresholds — no release build, no process
+per case.
 
 ## License
 

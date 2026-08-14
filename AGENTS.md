@@ -7,7 +7,7 @@ Rust statusline formatter for Claude Code. Reads JSON from stdin (piped by Claud
 ```bash
 make          # cargo build --release
 make clean    # cargo clean
-make test     # build + run smoke tests
+make test     # build + cargo test + smoke tests
 ```
 
 `make` is the Unix entry point. **`build.ps1` is its Windows equivalent** — same three targets
@@ -16,6 +16,28 @@ make test     # build + run smoke tests
 them has to land in all three files. `build.ps1` forces UTF-8 on capture (several assertions
 compare emoji, which a non-UTF-8 console code page would mangle) and, unlike the Makefile, exits
 non-zero when an assertion fails.
+
+**Testing is two layers, and both entry points run both.** `cargo test` (a `#[cfg(test)] mod
+tests` at the foot of `src/main.rs`) covers the threshold and formatting logic; the smoke
+assertions then exercise the real binary end to end. They are complements, not duplicates —
+each reaches what the other cannot:
+
+- **Unit tests** assert every colour band on *both* sides of its boundary. The smoke suites can
+  only sample a comfortable midpoint, so a constant could drift a long way before any of them
+  noticed. They are also deterministic, where the smoke assertions derive `resets_at` from the
+  wall clock. Anything clock-dependent (`burn_ratio`, `window_elapsed_secs`, `dry_in_suffix`)
+  is asserted **with a tolerance**, never exact equality — a second can tick between the test
+  computing `now` and the function reading it.
+- **Smoke assertions** cover what a unit test cannot reach: the assembled ANSI output, the
+  `.git/HEAD` read (via throwaway directories holding a synthetic HEAD), `--version`, and the
+  no-stdin blocking case.
+
+They run first because they fail in milliseconds without spawning a process per case. Note that
+**a threshold test must be verified to fail** when the constant moves — nudge the constant, watch
+it fail, revert. A boundary test that passes under a changed boundary is worthless. Beware also
+that on Windows a rapid file restore can leave `cargo` fingerprinting a stale artifact, so a
+"still failing after revert" result may be the incremental build, not the code; `rm -rf
+target/debug` settles it.
 
 **The build *rules* are a deliberate exception to that parity.** The Makefile statically links
 libc on Linux (see below); `build.ps1` runs a plain `cargo build --release` and takes only what
@@ -49,7 +71,8 @@ take a single `[char]`. Getting this wrong yields a needle that silently never m
   - **Non-Linux takes the plain build, chosen by `uname -s` rather than by trial.** macOS has no static libSystem and rustc *ignores* `crt-static` there instead of failing, so a probe-and-fallback would report success while silently producing an ordinary dynamic binary. The Makefile prints which path it took.
 - **Why `target-cpu=native` is not used anywhere** — it resolves through LLVM's `getHostCPUName()`, so it depends on the LLVM inside *that machine's* rustc rather than on upstream knowing the chip; Apple silicon has a history of being misidentified until a specific patch lands. It also makes the binary `SIGILL` on any CPU older than the build host. Against that risk it buys nothing measurable here: this program parses a ~1 KB JSON object and formats ten short strings, so there is no hot loop for SIMD or unrolling to act on.
 - **`input.json`** — the manual-check fixture both platforms' Testing sections pipe through the binary. Its numbers are deliberately self-consistent, not arbitrary sample data: 84k input tokens against a 200k `context_window_size` is exactly the 42% it reports, and the 80000/3150 cache split is the 96% hit ratio. It carries no `rate_limits`, so it renders the context and cache halves of line 2 only. Keep it coherent when editing — an incoherent fixture makes a real formatting bug look like bad input.
-- Git branch is read directly from `.git/HEAD` (no `git` subprocess). The forward slash is fine on Windows — Win32 accepts it — and `str::lines()` strips the CRLF, so the same code path serves both platforms. The name is capped at `BRANCH_MAX_CHARS` (40) with a trailing `…`: it is the only unbounded field on line 1 and renders *before* `⏳`/`⚡`, so an 80-character branch pushes exactly the segments that prompt a `/clear` off the right edge. The tail is what gets cut, since the head carries the ticket id that identifies the branch at a glance. Truncation counts `chars()`, not bytes — git permits UTF-8 in ref names, and a byte slice landing mid-codepoint panics.
+- Git branch is read directly from `.git/HEAD` (no `git` subprocess). The forward slash is fine on Windows — Win32 accepts it — and `str::lines()` strips the CRLF, so the same code path serves both platforms. The name is capped at `BRANCH_MAX_CHARS` (40) with a trailing `…`: it is the only unbounded field on line 1 and renders *before* `⏳`/`⚡`, so an 80-character branch pushes exactly the segments that prompt a `/clear` off the right edge. The tail is what gets cut, since the head carries the ticket id that identifies the branch at a glance. Truncation counts `chars()`, not bytes — git permits UTF-8 in ref names, and a byte slice landing mid-codepoint panics. **On a detached HEAD** the file holds a raw object id instead of a ref, and the segment used to render empty — going quiet in exactly the state most likely to leave you unsure where you are — so a 40-char all-hex line now shows as `🌿 @abc1234`. The `@` marks it as a commit rather than a branch that happens to be named like hex, echoing git's own "HEAD detached at abc1234"; slicing the first 7 bytes is safe only because the all-ASCII-hex check runs first. **Worktrees and submodules are a known gap**: there `.git` is a *file* holding a `gitdir:` pointer, `read_to_string(".git/HEAD")` fails, and the branch is omitted. Following that pointer is a separate change — the current behavior is silence, not a crash.
+- **Nothing in the render path may panic.** Under `panic = "abort"` a panic costs the *entire* status line, which is a bad trade for any single segment. `now_epoch()` therefore returns `Option` rather than unwrapping `duration_since(UNIX_EPOCH)`: a system clock before 1970 drops the countdown and the burn cue, which are states both call sites already produce for missing data. Like the `args_os` case above this is **deliberately unasserted** — a test would have to fake the system clock, and an assertion that cannot fail is worse than none.
 - **Directory basename** comes from `Path::file_name()` rather than a manual split. `workspace.current_dir` is backslash-delimited on Windows, so splitting on `'/'` alone returned the whole path; splitting on both separators unconditionally instead corrupted Unix directories whose *names* contain a backslash (a legal filename character there). `std::path` is compiled per-target and applies the right rule on each — `\` and `/` on Windows, only `/` on Unix — and handles a trailing separator, which the manual split rendered as an empty basename.
 - JSON is deserialized with `serde`/`serde_json` into structs with `Option<T>` fields — both a missing field and an explicit `null` become `None` automatically. The distinction matters here: Claude Code omits `rate_limits` and `effort` entirely when they don't apply, but sends `context_window.current_usage` and `used_percentage` as literal `null` before the first API call and again after `/compact`. `Option` covers both without a `#[serde(default)]` anywhere.
 - **Burn rate (5h window only)** — `burn_ratio()` returns `used_pct / expected_pct`, where `expected_pct` is the straight-line spend for the elapsed fraction of the window. The result is a multiple of budget: `1.0` is exactly on pace, above that is overspending. The `5h` label turns yellow at ≥1.15x and red at ≥1.75x; the ⏱️ icon becomes 🔥 at ≥1.4x — equivalent to 23/28/35 %/hour. The warn threshold sits above 1.0 on purpose: spending exactly on budget lands at 100% just as the window resets, so warning there would be permanently on and would flicker as the ratio crossed the line between refreshes. Red sits at 1.75x rather than higher because red at ratio `r` is unreachable past `5h / r` elapsed (it would need >100% used), so pushing it up shrinks the span of the window in which red can appear at all.

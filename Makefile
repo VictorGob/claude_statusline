@@ -37,7 +37,12 @@ $(TARGET): Cargo.toml src/main.rs build.rs
 clean:
 	cargo clean
 
+# Unit tests first: they cover the threshold boundaries the smoke assertions below can
+# only sample, and they fail in milliseconds without spawning a process per case.
 test: $(TARGET)
+	@echo "Running unit tests..."
+	cargo test --quiet
+	@echo ""
 	@echo "Testing basic functionality (line 1 only)..."
 	@echo '{"model":{"display_name":"Claude 3.5 Sonnet"},"workspace":{"current_dir":"/home/user/my-project"}}' | ./$(TARGET)
 	@echo ""
@@ -87,6 +92,19 @@ test: $(TARGET)
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":600000,"total_api_duration_ms":120000}}' | ./$(TARGET) | grep -q '⚡' && echo "FAIL: activity meaningless under 1h" || echo "PASS: no activity cue under 1h"
 	@echo "Testing activity clamps at 100% (parallel subagents sum past wall clock)..."
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":7200000,"total_api_duration_ms":18000000}}' | ./$(TARGET) | grep -q '⚡100%' && echo "PASS: activity clamped to 100%" || echo "FAIL: activity exceeded 100%"
+	@echo ""
+	@echo "Testing a detached HEAD shows the short SHA..."
+	@tmp=$$(mktemp -d) && mkdir -p $$tmp/.git && echo '1234567890abcdef1234567890abcdef12345678' > $$tmp/.git/HEAD && \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q '@1234567' \
+	  && echo "PASS: detached HEAD shows @1234567" || echo "FAIL: detached HEAD did not render the short SHA"; rm -rf $$tmp
+	@echo "Testing a worktree gitdir pointer renders no branch..."
+	@tmp=$$(mktemp -d) && mkdir -p $$tmp/.git && echo 'gitdir: /some/worktree/path' > $$tmp/.git/HEAD && \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q '🌿' \
+	  && echo "FAIL: gitdir pointer rendered a branch" || echo "PASS: gitdir pointer stays silent"; rm -rf $$tmp
+	@echo "Testing a normal ref still renders the branch name..."
+	@tmp=$$(mktemp -d) && mkdir -p $$tmp/.git && echo 'ref: refs/heads/some-branch' > $$tmp/.git/HEAD && \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q 'some-branch' \
+	  && echo "PASS: ref renders branch name" || echo "FAIL: ref did not render the branch name"; rm -rf $$tmp
 	@echo ""
 	@echo "Testing --version prints name, semver and build SHA..."
 	@./$(TARGET) --version | grep -qE '^claude_statusline [0-9]+\.[0-9]+\.[0-9]+ \(.+\)$$' && echo "PASS: version format" || echo "FAIL: bad version format"
