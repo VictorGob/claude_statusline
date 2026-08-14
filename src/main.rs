@@ -39,6 +39,11 @@ const ACTIVITY_WARN_PCT: f64 = 5.0;
 /// is where the ticket id lives, which is what identifies the branch at a glance.
 const BRANCH_MAX_CHARS: usize = 40;
 
+/// A full object id as stored in `.git/HEAD` when detached, and the prefix shown for it.
+/// Slicing by byte is safe only because the value is verified all-ASCII-hex first.
+const GIT_SHA_LEN: usize = 40;
+const GIT_SHORT_SHA_LEN: usize = 7;
+
 const COLOR_GREEN: &str = "\x1b[32m";
 const COLOR_YELLOW: &str = "\x1b[33m";
 const COLOR_RED: &str = "\x1b[31m";
@@ -108,11 +113,14 @@ struct RateLimit {
     resets_at: Option<i64>,
 }
 
-fn now_epoch() -> i64 {
+/// None when the system clock reads before 1970. Returning Option rather than unwrapping
+/// keeps a broken clock to the two segments that need the time: under panic = "abort" a
+/// panic here would render no status line at all, which is a poor trade for a countdown.
+fn now_epoch() -> Option<i64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
+        .ok()
+        .map(|d| d.as_secs() as i64)
 }
 
 /// Format "resets in" hyperlinked suffix, e.g. ", resets in 2h30m". Empty if resets_at not set/past.
@@ -121,7 +129,12 @@ fn format_reset_suffix(resets_at: Option<i64>) -> String {
         Some(v) if v > 0 => v,
         _ => return String::new(),
     };
-    let remaining = resets_at - now_epoch();
+    let now = match now_epoch() {
+        Some(now) => now,
+        // Unreadable clock: no countdown, same as a missing resets_at.
+        None => return String::new(),
+    };
+    let remaining = resets_at - now;
     if remaining <= 0 {
         return String::new();
     }
@@ -168,6 +181,19 @@ fn read_git_branch() -> String {
             };
             format!(" | 🌿 {}{}{}", COLOR_GREEN, shown, COLOR_RESET)
         }
+        // Detached HEAD: the file holds a raw object id instead of a ref, and rendering
+        // nothing would go quiet in exactly the state most likely to leave you unsure
+        // where you are. The '@' marks it as a commit rather than a branch that happens
+        // to be named like hex, echoing git's own "HEAD detached at abc1234".
+        None if line.len() == GIT_SHA_LEN && line.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            format!(
+                " | 🌿 {}@{}{}",
+                COLOR_GREEN,
+                &line[..GIT_SHORT_SHA_LEN],
+                COLOR_RESET
+            )
+        }
+        // Anything else (a worktree's gitdir pointer, a malformed file) stays silent.
         None => String::new(),
     }
 }
@@ -203,7 +229,9 @@ fn window_elapsed_secs(resets_at: Option<i64>) -> Option<f64> {
         Some(v) if v > 0 => v,
         _ => return None,
     };
-    let remaining = resets_at - now_epoch();
+    // `?`: an unreadable clock lands in the same bucket as clock skew below — no burn
+    // coloring and no projection.
+    let remaining = resets_at - now_epoch()?;
     if remaining <= 0 || remaining > FIVE_HOUR_WINDOW_SECS {
         return None;
     }
@@ -361,7 +389,7 @@ fn pct_color(pct: f64) -> (&'static str, &'static str) {
     }
 }
 
-/// `claude_statusline 0.1.0 (0f06173)`, with `-dirty` when built from an edited tree and
+/// `claude_statusline 0.2.0 (8d879d1)`, with `-dirty` when built from an edited tree and
 /// `unknown` when built outside a git checkout. GIT_SHA is captured at compile time by
 /// build.rs, so it names the commit the binary was *built* from.
 fn print_version() {

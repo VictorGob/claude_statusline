@@ -87,6 +87,21 @@ function Invoke-NoStdin([string[]]$Arguments, [int]$TimeoutMs = 5000) {
     return @{ TimedOut = $false; Output = $out; ExitCode = $code }
 }
 
+# Runs the binary from inside a throwaway directory holding a synthetic .git/HEAD. The
+# branch is read relative to the working directory, so this is what makes the detached-HEAD
+# path assertable without touching the real repo. $Target is absolute, so it still resolves.
+function Invoke-StatuslineWithHead([string]$HeadContent, [string]$Json) {
+    $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("statusline_head_" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force (Join-Path $dir ".git") | Out-Null
+    try {
+        Set-Content (Join-Path $dir ".git\HEAD") $HeadContent -NoNewline
+        Push-Location $dir
+        try { return ($Json | & $Target | Out-String) } finally { Pop-Location }
+    } finally {
+        Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Assert-True([bool]$Condition, [string]$PassMessage, [string]$FailMessage) {
     if ($Condition) {
         Write-Host "PASS: $PassMessage"
@@ -242,6 +257,22 @@ function Invoke-Test {
         -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":7200000,"total_api_duration_ms":18000000}}' `
         -Needle "${Bolt}100%" -ShouldContain $true `
         -PassMessage "activity clamped to 100%" -FailMessage "activity exceeded 100%"
+
+    # --- Detached HEAD ----------------------------------------------------------
+    $headJson = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}'
+    $Herb = "$([char]0xD83C)$([char]0xDF3F)"
+
+    Write-Host "Testing a detached HEAD shows the short SHA..."
+    Assert-True ((Invoke-StatuslineWithHead "1234567890abcdef1234567890abcdef12345678" $headJson).Contains("@1234567")) `
+        "detached HEAD shows @1234567" "detached HEAD did not render the short SHA"
+
+    Write-Host "Testing a worktree gitdir pointer renders no branch..."
+    Assert-True (-not (Invoke-StatuslineWithHead "gitdir: /some/worktree/path" $headJson).Contains($Herb)) `
+        "gitdir pointer stays silent" "gitdir pointer rendered a branch"
+
+    Write-Host "Testing a normal ref still renders the branch name..."
+    Assert-True ((Invoke-StatuslineWithHead "ref: refs/heads/some-branch" $headJson).Contains("some-branch")) `
+        "ref renders branch name" "ref did not render the branch name"
 
     # --- Version ----------------------------------------------------------------
     # Mirrors the --version block in the Makefile. Every call here runs with stdin

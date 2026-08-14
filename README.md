@@ -159,7 +159,7 @@ Either Rust toolchain works. `x86_64-pc-windows-gnu` needs no Visual Studio — 
 
 ```console
 $ claude_statusline --version
-claude_statusline 0.1.0 (0f06173)
+claude_statusline 0.2.0 (8d879d1)
 ```
 
 `-V` is an alias. The SHA is the commit that was checked out **when the binary was built**, which
@@ -168,8 +168,8 @@ built locally, so a `git pull` and a rebuild move it forward on their own. Two t
 tell you rather than hide:
 
 ```
-claude_statusline 0.1.0 (0f06173-dirty)   built from a tree with uncommitted changes
-claude_statusline 0.1.0 (unknown)         built outside a git checkout, or without git
+claude_statusline 0.2.0 (8d879d1-dirty)   built from a tree with uncommitted changes
+claude_statusline 0.2.0 (unknown)         built outside a git checkout, or without git
 ```
 
 Every other argument is ignored and the statusline renders as normal, so nothing breaks if Claude
