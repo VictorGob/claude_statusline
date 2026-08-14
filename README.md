@@ -173,7 +173,8 @@ claude_statusline 0.1.0 (unknown)         built outside a git checkout, or witho
 ```
 
 Every other argument is ignored and the statusline renders as normal, so nothing breaks if Claude
-Code ever passes one.
+Code ever passes one. On Unix the wrapper forwards arguments too, so `./statusline.sh --version`
+works the same way.
 
 ## Testing
 
