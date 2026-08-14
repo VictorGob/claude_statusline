@@ -377,7 +377,15 @@ fn main() {
     // Before the stdin read, not after: --version run from a terminal has no pipe feeding
     // it, so reading first would block forever instead of printing. Any other argument
     // falls through and is ignored, so a future Claude Code that passes one still renders.
-    if let Some("--version") | Some("-V") = std::env::args().nth(1).as_deref() {
+    //
+    // args_os, not args: args() panics on an argument that isn't valid UTF-8, and with
+    // panic="abort" that renders no status line at all rather than ignoring the argument
+    // as the line above promises. OsStr implements PartialEq<str>, so the comparison stays
+    // direct with no lossy conversion. Reachable on Unix, where argv is raw bytes; on
+    // Windows argv arrives as UTF-16 and invalid means an unpaired surrogate, which is why
+    // there is no smoke assertion for this (see AGENTS.md).
+    if matches!(std::env::args_os().nth(1).as_deref(),
+                Some(arg) if arg == "--version" || arg == "-V") {
         print_version();
         return;
     }
