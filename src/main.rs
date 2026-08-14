@@ -33,6 +33,12 @@ const AGE_HIGH_SECS: u64 = 8 * 3600;
 const ACTIVITY_MIN_AGE_SECS: u64 = 3600;
 const ACTIVITY_WARN_PCT: f64 = 5.0;
 
+/// The branch is the only unbounded field on line 1, and it renders before the age
+/// and activity indicators — so an overlong branch pushes exactly the segments that
+/// prompt a /clear off the right edge. Cut the tail rather than the middle: the head
+/// is where the ticket id lives, which is what identifies the branch at a glance.
+const BRANCH_MAX_CHARS: usize = 40;
+
 const COLOR_GREEN: &str = "\x1b[32m";
 const COLOR_YELLOW: &str = "\x1b[33m";
 const COLOR_RED: &str = "\x1b[31m";
@@ -150,7 +156,18 @@ fn read_git_branch() -> String {
     let line = content.lines().next().unwrap_or("");
 
     match line.strip_prefix(GIT_REF_PREFIX) {
-        Some(branch) => format!(" | 🌿 {}{}{}", COLOR_GREEN, branch, COLOR_RESET),
+        Some(branch) => {
+            // Count and take chars, not bytes: git permits UTF-8 in ref names, and a
+            // byte slice landing mid-codepoint panics.
+            let shown = if branch.chars().count() > BRANCH_MAX_CHARS {
+                let mut s: String = branch.chars().take(BRANCH_MAX_CHARS - 1).collect();
+                s.push('…');
+                s
+            } else {
+                branch.to_string()
+            };
+            format!(" | 🌿 {}{}{}", COLOR_GREEN, shown, COLOR_RESET)
+        }
         None => String::new(),
     }
 }
@@ -333,7 +350,7 @@ fn session_suffix(cost: &Cost) -> String {
     out
 }
 
-/// Returns (color, reset) escape codes for a percentage, matching the C thresholds.
+/// Returns (color, reset) escape codes for a percentage: yellow at 60%, red at 90%.
 fn pct_color(pct: f64) -> (&'static str, &'static str) {
     if pct >= 90.0 {
         (COLOR_RED, COLOR_RESET)
