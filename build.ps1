@@ -56,8 +56,44 @@ function Invoke-Clean {
 $script:Failures = 0
 $ESC = [char]27
 
-function Invoke-Statusline([string]$Json) {
-    return ($Json | & $Target | Out-String)
+function Invoke-Statusline([string]$Json, [string[]]$Arguments = @()) {
+    return ($Json | & $Target @Arguments | Out-String)
+}
+
+# Runs the binary with NO stdin attached and a hard timeout, so that a --version that
+# blocks waiting on a pipe fails the run instead of hanging it forever. Returns exit code
+# and stdout, or TimedOut.
+function Invoke-NoStdin([string[]]$Arguments, [int]$TimeoutMs = 5000) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $Target
+    foreach ($arg in $Arguments) { $psi.ArgumentList.Add($arg) }
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $proc.StandardInput.Close()
+    # WaitForExit before ReadToEnd, deliberately: ReadToEnd blocks until stdout closes, so
+    # reading first would hang on the very case this guard exists to catch. Safe only
+    # because the output is one short line, far under the pipe buffer.
+    if (-not $proc.WaitForExit($TimeoutMs)) {
+        try { $proc.Kill() } catch { }
+        return @{ TimedOut = $true; Output = ""; ExitCode = -1 }
+    }
+    $out = $proc.StandardOutput.ReadToEnd()
+    $code = $proc.ExitCode
+    $proc.Dispose()
+    return @{ TimedOut = $false; Output = $out; ExitCode = $code }
+}
+
+function Assert-True([bool]$Condition, [string]$PassMessage, [string]$FailMessage) {
+    if ($Condition) {
+        Write-Host "PASS: $PassMessage"
+    } else {
+        Write-Host "FAIL: $FailMessage"
+        $script:Failures++
+    }
 }
 
 # Asserts that $Json produces output which does (or does not) contain $Needle.
@@ -206,6 +242,33 @@ function Invoke-Test {
         -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":7200000,"total_api_duration_ms":18000000}}' `
         -Needle "${Bolt}100%" -ShouldContain $true `
         -PassMessage "activity clamped to 100%" -FailMessage "activity exceeded 100%"
+
+    # --- Version ----------------------------------------------------------------
+    # Mirrors the --version block in the Makefile. Every call here runs with stdin
+    # closed, which is the regression that matters: the arg check has to happen before
+    # the stdin read or --version blocks forever on a pipe that never arrives.
+
+    Write-Host "Testing --version prints name, semver and build SHA..."
+    $ver = Invoke-NoStdin @("--version")
+    Assert-True (-not $ver.TimedOut) "returns without stdin" "--version blocked waiting on stdin"
+    Assert-True ($ver.Output.Trim() -match '^claude_statusline \d+\.\d+\.\d+ \(.+\)$') `
+        "version format" "bad version format: '$($ver.Output.Trim())'"
+
+    Write-Host "Testing --version exits 0..."
+    Assert-True ($ver.ExitCode -eq 0) "exit 0" "non-zero exit: $($ver.ExitCode)"
+
+    Write-Host "Testing -V matches --version..."
+    $short = Invoke-NoStdin @("-V")
+    Assert-True (-not $short.TimedOut) "-V returns without stdin" "-V blocked waiting on stdin"
+    Assert-True ($short.Output -ceq $ver.Output) "-V is an alias" "-V differs from --version"
+
+    # Compares against the no-arg run rather than grepping for a needle: the dir basename
+    # is wrapped in a color escape ("\e[36mtmp"), so "unknown arg renders identically" is
+    # both easier to assert and a stronger claim than any substring match.
+    Write-Host "Testing an unrecognized argument still renders a statusline..."
+    $strayJson = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}'
+    Assert-True ((Invoke-Statusline $strayJson @("--not-a-flag")) -ceq (Invoke-Statusline $strayJson)) `
+        "unknown arg ignored" "unknown arg changed the output"
 
     Write-Host ""
     if ($script:Failures -gt 0) {
