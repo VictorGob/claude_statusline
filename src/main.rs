@@ -16,6 +16,23 @@ const BURN_WARN_RATIO: f64 = 1.15;
 const BURN_FIRE_RATIO: f64 = 1.4;
 const BURN_HIGH_RATIO: f64 = 1.75;
 
+/// Below this much context the cache indicator stays hidden. A cold start is all
+/// cache writes by construction, so an ungated indicator would sit red on every
+/// session opening. Gating on context size rather than on `read > 0` keeps a
+/// genuine post-TTL 0% visible, which is the event actually worth seeing.
+const CACHE_MIN_CONTEXT_PCT: f64 = 30.0;
+/// These run backwards from every other threshold here: high is good.
+const CACHE_WARN_RATIO: f64 = 0.85;
+const CACHE_HIGH_RATIO: f64 = 0.60;
+
+/// Under a minute there is nothing to say about a session's age.
+const AGE_MIN_SECS: u64 = 60;
+const AGE_WARN_SECS: u64 = 4 * 3600;
+const AGE_HIGH_SECS: u64 = 8 * 3600;
+/// Below an hour the API/wall ratio swings too wildly to mean anything.
+const ACTIVITY_MIN_AGE_SECS: u64 = 3600;
+const ACTIVITY_WARN_PCT: f64 = 5.0;
+
 const COLOR_GREEN: &str = "\x1b[32m";
 const COLOR_YELLOW: &str = "\x1b[33m";
 const COLOR_RED: &str = "\x1b[31m";
@@ -32,6 +49,7 @@ struct Root {
     context_window: Option<ContextWindow>,
     rate_limits: Option<RateLimits>,
     effort: Option<Effort>,
+    cost: Option<Cost>,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +70,24 @@ struct Workspace {
 #[derive(Deserialize)]
 struct ContextWindow {
     used_percentage: Option<f64>,
+    /// The most recent response's usage, not a session total. Explicitly null
+    /// before the first API call and again after /compact — Option covers both
+    /// that and the field being absent.
+    current_usage: Option<CurrentUsage>,
+}
+
+#[derive(Deserialize)]
+struct CurrentUsage {
+    cache_creation_input_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+}
+
+/// Wall-clock and API time for the session. /clear resets both, so the age is
+/// really "time since the last /clear" — which is when context started growing.
+#[derive(Deserialize)]
+struct Cost {
+    total_duration_ms: Option<u64>,
+    total_api_duration_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -204,6 +240,99 @@ fn burn_color(ratio: Option<f64>) -> (&'static str, &'static str) {
     }
 }
 
+/// Share of the last response's context tokens served from cache rather than
+/// written into it. None when either count is missing or nothing was cached at all.
+fn cache_hit_ratio(usage: &CurrentUsage) -> Option<f64> {
+    let read = usage.cache_read_input_tokens? as f64;
+    let created = usage.cache_creation_input_tokens? as f64;
+    let total = read + created;
+    if total <= 0.0 {
+        return None;
+    }
+    Some(read / total)
+}
+
+/// "💾 91%" — how much of this turn's context was re-read instead of rebuilt.
+/// A cache write costs roughly 12x a cache read, so this tracks what the turn
+/// cost. Empty below CACHE_MIN_CONTEXT_PCT, where the number is all startup
+/// writes and a rebuild is cheap anyway.
+fn cache_suffix(used_pct: Option<f64>, usage: Option<&CurrentUsage>) -> String {
+    match used_pct {
+        Some(p) if p >= CACHE_MIN_CONTEXT_PCT => {}
+        _ => return String::new(),
+    }
+    let ratio = match usage.and_then(cache_hit_ratio) {
+        Some(r) => r,
+        None => return String::new(),
+    };
+    let (color, reset) = cache_color(ratio);
+    format!("{}💾 {:.0}%{}", color, ratio * 100.0, reset)
+}
+
+/// Colors the cache ratio. Inverted against pct_color: high is healthy.
+fn cache_color(ratio: f64) -> (&'static str, &'static str) {
+    if ratio < CACHE_HIGH_RATIO {
+        (COLOR_RED, COLOR_RESET)
+    } else if ratio < CACHE_WARN_RATIO {
+        (COLOR_YELLOW, COLOR_RESET)
+    } else {
+        ("", "")
+    }
+}
+
+/// Session age as "1d3h" / "4h02m" / "12m". Zero-padded minutes and no seconds
+/// branch, which is why it isn't shared with the countdown formatters above.
+fn format_age(secs: u64) -> String {
+    let days = secs / 86400;
+    let h = (secs % 86400) / 3600;
+    let m = (secs % 3600) / 60;
+    if days > 0 {
+        format!("{}d{}h", days, h)
+    } else if h > 0 {
+        format!("{}h{:02}m", h, m)
+    } else {
+        format!("{}m", m)
+    }
+}
+
+/// " | ⏳ 4h02m ⚡8%" — how long this context has been accumulating, and how much
+/// of that was actually spent waiting on the model. A long session that is mostly
+/// idle is a large context held open for nothing, and re-sent on every turn.
+fn session_suffix(cost: &Cost) -> String {
+    let secs = match cost.total_duration_ms {
+        Some(ms) if ms / 1000 >= AGE_MIN_SECS => ms / 1000,
+        _ => return String::new(),
+    };
+    let (color, reset) = if secs >= AGE_HIGH_SECS {
+        (COLOR_RED, COLOR_RESET)
+    } else if secs >= AGE_WARN_SECS {
+        (COLOR_YELLOW, COLOR_RESET)
+    } else {
+        ("", "")
+    };
+
+    let mut out = format!(" | ⏳ {}{}{}", color, format_age(secs), reset);
+
+    // Both conditions have to hold: a low active share only means something once
+    // the session has been open long enough for the idling to have cost anything.
+    if secs >= ACTIVITY_MIN_AGE_SECS {
+        if let Some(api_ms) = cost.total_api_duration_ms {
+            // Clamped: total_api_duration_ms sums per-request durations, so parallel
+            // subagents push it past wall clock. This answers "how much of the session
+            // was real work" — a bounded share — so 100% is the honest ceiling; degree
+            // of parallelism is a different question this cue isn't for.
+            let pct = (api_ms as f64 / (secs * 1000) as f64 * 100.0).min(100.0);
+            let (c, r) = if secs >= AGE_WARN_SECS && pct < ACTIVITY_WARN_PCT {
+                (COLOR_YELLOW, COLOR_RESET)
+            } else {
+                ("", "")
+            };
+            out.push_str(&format!(" {}⚡{:.0}%{}", c, pct, r));
+        }
+    }
+    out
+}
+
 /// Returns (color, reset) escape codes for a percentage, matching the C thresholds.
 fn pct_color(pct: f64) -> (&'static str, &'static str) {
     if pct >= 90.0 {
@@ -242,7 +371,11 @@ fn main() {
 
     let effort_level = root.effort.and_then(|e| e.level);
 
-    let used_pct = root.context_window.and_then(|c| c.used_percentage);
+    let context_window = root.context_window;
+    let used_pct = context_window.as_ref().and_then(|c| c.used_percentage);
+    let current_usage = context_window
+        .as_ref()
+        .and_then(|c| c.current_usage.as_ref());
 
     let (five_hour_pct, five_hour_resets_at) = root
         .rate_limits
@@ -275,9 +408,12 @@ fn main() {
         None => String::new(),
     };
 
-    // Build line 1: [Model] effort | 📁 dir | 🌿 branch
+    // Session age and active share, when the session is old enough to have any
+    let age_suffix = root.cost.as_ref().map(session_suffix).unwrap_or_default();
+
+    // Build line 1: [Model] effort | 📁 dir | 🌿 branch | ⏳ age ⚡active
     let line1 = format!(
-        "{}{}{}{} | 📁 {}{}{}{}",
+        "{}{}{}{} | 📁 {}{}{}{}{}",
         STYLE_BOLD,
         model_name,
         COLOR_RESET,
@@ -285,7 +421,8 @@ fn main() {
         COLOR_CYAN,
         dir_basename,
         COLOR_RESET,
-        git_branch
+        git_branch,
+        age_suffix
     );
 
     // Build line 2 (only if there's data)
@@ -295,6 +432,15 @@ fn main() {
     if let Some(pct) = used_pct {
         let (color, reset) = pct_color(pct);
         line2.push_str(&format!("{}🎫 {:.0}%{}", color, pct, reset));
+        has_content = true;
+    }
+
+    let cache = cache_suffix(used_pct, current_usage);
+    if !cache.is_empty() {
+        if has_content {
+            line2.push_str(" | ");
+        }
+        line2.push_str(&cache);
         has_content = true;
     }
 

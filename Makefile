@@ -1,11 +1,36 @@
 TARGET = target/release/claude_statusline
+TRIPLE := $(shell rustc -vV 2>/dev/null | awk '/^host:/{print $$2}')
 
 .PHONY: all clean test
 
 all: $(TARGET)
 
+# On Linux, link libc statically: it removes the dynamic loader's symbol resolution
+# from every spawn, which is where this program's runtime actually goes. Measured at
+# ~750us -> ~555us (~26% faster startup) and 81 -> 49 syscalls. opt-level alone moved
+# nothing, since there is no hot loop here to optimize. Note hyperfine is unreliable
+# at this timescale on a scaling CPU; see the benchmarking note in AGENTS.md.
+#
+# The explicit --target is required, not cosmetic: without it RUSTFLAGS also reaches
+# serde_derive, and a proc-macro cannot be built as a static lib ("does not support
+# these crate types"). Passing --target splits host from target artifacts, but also
+# relocates the output, hence the copy back to $(TARGET) that statusline.sh expects.
+#
+# Anything not Linux takes the plain build. macOS has no static libSystem and rustc
+# *ignores* crt-static there rather than failing, so probing by trial would silently
+# report success while producing an ordinary dynamic binary. target-cpu=native is
+# deliberately not used anywhere: it buys nothing measurable on this workload and
+# makes the binary SIGILL on older CPUs.
 $(TARGET): Cargo.toml src/main.rs
-	cargo build --release
+	@if [ "$$(uname -s)" = "Linux" ] && [ -n "$(TRIPLE)" ] && \
+	    RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target $(TRIPLE) 2>/dev/null && \
+	    echo '{}' | ./target/$(TRIPLE)/release/claude_statusline >/dev/null 2>&1; then \
+		mkdir -p $(dir $(TARGET)); \
+		cp target/$(TRIPLE)/release/claude_statusline $(TARGET); \
+		echo "Built: static (libc linked in)"; \
+	else \
+		cargo build --release && echo "Built: default (dynamic libc)"; \
+	fi
 
 clean:
 	cargo clean
@@ -44,3 +69,19 @@ test: $(TARGET)
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":30,"resets_at":'$$(( $$(date +%s) + 14400 ))'}}}' | ./$(TARGET) | grep -q 'dry in' && echo "FAIL: dry-in below red" || echo "PASS: no dry-in below red"
 	@echo "Testing 7d never shows a burn flame (2d elapsed, 45% used)..."
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"seven_day":{"used_percentage":45,"resets_at":'$$(( $$(date +%s) + 432000 ))'}}}' | ./$(TARGET) | grep -q '🔥' && echo "FAIL: 7d should not flag pace" || echo "PASS: 7d has no pace cue"
+	@echo "Testing healthy cache ratio is uncolored (60% context, 95k read / 5k write)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":60,"current_usage":{"cache_read_input_tokens":95000,"cache_creation_input_tokens":5000}}}' | ./$(TARGET) | grep -q '| 💾 95%' && echo "PASS: cache 95% shown plain" || echo "FAIL: cache ratio missing or colored"
+	@echo "Testing cache miss is red (60% context, 20k read / 80k write)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":60,"current_usage":{"cache_read_input_tokens":20000,"cache_creation_input_tokens":80000}}}' | ./$(TARGET) | grep -q "$$(printf '\033')\[31m💾 20%" && echo "PASS: red at 20% hit rate" || echo "FAIL: missing red on cache miss"
+	@echo "Testing cache indicator hidden below the context floor (10% context)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":10,"current_usage":{"cache_read_input_tokens":20000,"cache_creation_input_tokens":80000}}}' | ./$(TARGET) | grep -q '💾' && echo "FAIL: cold start should not flag a miss" || echo "PASS: no cache cue under 30% context"
+	@echo "Testing cache indicator hidden when current_usage is null (post-/compact)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":60,"current_usage":null}}' | ./$(TARGET) | grep -q '💾' && echo "FAIL: null usage should render nothing" || echo "PASS: no cache cue without usage"
+	@echo "Testing session age warns and shows activity (5h02m wall, 5m API)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":18120000,"total_api_duration_ms":300000}}' | ./$(TARGET) | grep -q "$$(printf '\033')\[33m5h02m" && echo "PASS: yellow age past 4h" || echo "FAIL: missing yellow age"
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":18120000,"total_api_duration_ms":300000}}' | ./$(TARGET) | grep -q '⚡2%' && echo "PASS: activity shown on long session" || echo "FAIL: activity missing"
+	@echo "Testing a short session shows age but no activity (10m wall)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":600000,"total_api_duration_ms":120000}}' | ./$(TARGET) | grep -q '⏳ 10m' && echo "PASS: 10m age shown plain" || echo "FAIL: age missing"
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":600000,"total_api_duration_ms":120000}}' | ./$(TARGET) | grep -q '⚡' && echo "FAIL: activity meaningless under 1h" || echo "PASS: no activity cue under 1h"
+	@echo "Testing activity clamps at 100% (parallel subagents sum past wall clock)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":7200000,"total_api_duration_ms":18000000}}' | ./$(TARGET) | grep -q '⚡100%' && echo "PASS: activity clamped to 100%" || echo "FAIL: activity exceeded 100%"
