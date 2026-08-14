@@ -7,7 +7,7 @@
 .EXAMPLE
     .\build.ps1 -Clean     # cargo clean             (same as `make clean`)
 .EXAMPLE
-    .\build.ps1 -Test      # build, then run the smoke tests (same as `make test`)
+    .\build.ps1 -Test      # build, then run cargo test + the smoke tests (same as `make test`)
 #>
 [CmdletBinding()]
 param(
