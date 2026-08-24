@@ -25,8 +25,10 @@ like hex:
 🌿 @8d879d1
 ```
 
-In a git worktree or submodule the branch is omitted entirely: `.git` is a file holding a
-pointer there rather than a directory, and following it isn't implemented.
+In a git worktree `.git` is a file holding a pointer rather than a directory, so no branch is
+readable. The worktree's own name is shown instead, from the payload — close enough to place you,
+though it names the worktree rather than the branch in it. Submodules have the same shape but no
+such field, so there the branch is still omitted.
 
 **Burn rate:** the 5-hour quota is 100%, so 20%/hour is a sustainable pace. Overspend it and the `5h` label turns yellow (≥23%/h) then red (≥35%/h), with the ⏱️ icon becoming 🔥 at ≥28%/h. Stays invisible while you're on pace.
 

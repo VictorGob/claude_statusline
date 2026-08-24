@@ -102,6 +102,23 @@ function Invoke-StatuslineWithHead([string]$HeadContent, [string]$Json) {
     }
 }
 
+# Shapes the helper above cannot produce, both of which make `.git/HEAD` fail to *open*
+# rather than parse oddly: a real worktree, where `.git` is a *file* holding a gitdir:
+# pointer, and a plain folder with no `.git` at all. Pass -NoGit for the latter.
+function Invoke-StatuslineInWorktree([string]$Json, [switch]$NoGit) {
+    $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("statusline_wt_" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    try {
+        if (-not $NoGit) {
+            Set-Content (Join-Path $dir ".git") "gitdir: /some/repo/.git/worktrees/feat" -NoNewline
+        }
+        Push-Location $dir
+        try { return ($Json | & $Target | Out-String) } finally { Pop-Location }
+    } finally {
+        Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Assert-True([bool]$Condition, [string]$PassMessage, [string]$FailMessage) {
     if ($Condition) {
         Write-Host "PASS: $PassMessage"
@@ -294,6 +311,24 @@ function Invoke-Test {
     Write-Host "Testing a worktree gitdir pointer renders no branch..."
     Assert-True (-not (Invoke-StatuslineWithHead "gitdir: /some/worktree/path" $headJson).Contains($Herb)) `
         "gitdir pointer stays silent" "gitdir pointer rendered a branch"
+
+    Write-Host "Testing a real worktree (.git is a FILE) falls back to the worktree name..."
+    $wtJson = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp","git_worktree":"my-feature"}}'
+    Assert-True ((Invoke-StatuslineInWorktree $wtJson).Contains("my-feature")) `
+        "worktree name shown when HEAD is unreadable" "worktree fallback missing"
+
+    Write-Host "Testing a worktree-shaped .git without the field stays silent..."
+    Assert-True (-not (Invoke-StatuslineInWorktree $headJson).Contains($Herb)) `
+        "no field, no segment" "rendered a branch with nothing to render"
+
+    Write-Host "Testing a plain non-git folder is unaffected by the fallback..."
+    Assert-True (-not (Invoke-StatuslineInWorktree $headJson -NoGit).Contains($Herb)) `
+        "non-git folder stays silent" "non-git folder rendered a branch"
+
+    Write-Host "Testing a real branch wins over the worktree field (fast path first)..."
+    Assert-True (-not (Invoke-StatuslineWithHead "ref: refs/heads/real-branch" `
+        '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp","git_worktree":"ignored-name"}}').Contains("ignored-name")) `
+        ".git/HEAD takes precedence" "fallback overrode a readable HEAD"
 
     Write-Host "Testing a normal ref still renders the branch name..."
     Assert-True ((Invoke-StatuslineWithHead "ref: refs/heads/some-branch" $headJson).Contains("some-branch")) `
