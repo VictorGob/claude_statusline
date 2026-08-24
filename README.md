@@ -32,6 +32,8 @@ pointer there rather than a directory, and following it isn't implemented.
 
 Warnings start at 23%/h rather than 20%/h so that spending exactly on budget — which lands at 100% right as the window resets — doesn't sit permanently yellow.
 
+The rate alone isn't enough: you also have to be at least 1 percentage point ahead of budget. Early on the budget-so-far is near zero, so a single request four minutes in divides out to 3x without meaning anything. Requiring both lets the cue work from 6 minutes in rather than staying blind for 15 — a real 2x overspend shows at 6 minutes, mild drift waits until 20.
+
 ```
 🎫 42% | 🔥 5h: 30%, resets in 4h0m | 📅 7d: 20%, resets in 5d0h
 ```
@@ -142,6 +144,12 @@ Add to `~/.claude/settings.json`:
   }
 }
 ```
+
+Optionally add `"refreshInterval": 120` (seconds) alongside `padding`. Without it Claude Code re-runs
+the command on events only, so the countdown, `dry in`, and burn cue — all computed from the clock —
+freeze between messages. That bites while idle: your spend stops but time doesn't, so the burn rate is
+quietly falling while a frozen line still shows the 🔥. Under ~30s buys nothing; the countdown only
+renders whole minutes.
 
 ### Windows
 
