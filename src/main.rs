@@ -85,6 +85,8 @@ struct Effort {
 #[derive(Deserialize)]
 struct Workspace {
     current_dir: Option<String>,
+    /// Present only inside a linked worktree, where `.git/HEAD` cannot be opened.
+    git_worktree: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -170,26 +172,47 @@ fn format_reset_suffix(resets_at: Option<i64>) -> String {
     }
 }
 
-fn read_git_branch() -> String {
+/// Caps a ref name at BRANCH_MAX_CHARS with a trailing `…`. Counts and takes chars, not
+/// bytes: git permits UTF-8 in ref names, and a byte slice landing mid-codepoint panics.
+fn truncate_ref(name: &str) -> String {
+    if name.chars().count() > BRANCH_MAX_CHARS {
+        let mut s: String = name.chars().take(BRANCH_MAX_CHARS - 1).collect();
+        s.push('…');
+        s
+    } else {
+        name.to_string()
+    }
+}
+
+/// Last resort when `.git/HEAD` yields no branch. In a linked worktree it cannot even be
+/// opened — `.git` is a *file* holding a `gitdir:` pointer, so the read fails with
+/// ENOTDIR — and `workspace.git_worktree` is already in the payload, so following that
+/// pointer would buy a second lookup for nothing. Names the *worktree*, not the branch in
+/// it; rendered plainly anyway, since unlike a bare SHA it can't be mistaken for a ref.
+fn worktree_segment(worktree: Option<&str>) -> String {
+    match worktree {
+        Some(name) if !name.is_empty() => branch_segment(name),
+        _ => String::new(),
+    }
+}
+
+/// The `🌿` segment for a ref name: capped, coloured, with its leading separator.
+fn branch_segment(name: &str) -> String {
+    let shown = truncate_ref(name);
+    format!(" | 🌿 {}{}{}", COLOR_GREEN, shown, COLOR_RESET)
+}
+
+fn read_git_branch(worktree: Option<&str>) -> String {
     let content = match std::fs::read_to_string(GIT_HEAD_PATH) {
         Ok(c) => c,
-        Err(_) => return String::new(),
+        // Not a git dir, or a worktree where `.git` is a file. Outside a worktree the
+        // field is absent, so a plain folder returns the same empty string as before.
+        Err(_) => return worktree_segment(worktree),
     };
     let line = content.lines().next().unwrap_or("");
 
     match line.strip_prefix(GIT_REF_PREFIX) {
-        Some(branch) => {
-            // Count and take chars, not bytes: git permits UTF-8 in ref names, and a
-            // byte slice landing mid-codepoint panics.
-            let shown = if branch.chars().count() > BRANCH_MAX_CHARS {
-                let mut s: String = branch.chars().take(BRANCH_MAX_CHARS - 1).collect();
-                s.push('…');
-                s
-            } else {
-                branch.to_string()
-            };
-            format!(" | 🌿 {}{}{}", COLOR_GREEN, shown, COLOR_RESET)
-        }
+        Some(branch) => branch_segment(branch),
         // Detached HEAD: the file holds a raw object id instead of a ref, and rendering
         // nothing would go quiet in exactly the state most likely to leave you unsure
         // where you are. The '@' marks it as a commit rather than a branch that happens
@@ -202,8 +225,8 @@ fn read_git_branch() -> String {
                 COLOR_RESET
             )
         }
-        // Anything else (a worktree's gitdir pointer, a malformed file) stays silent.
-        None => String::new(),
+        // Malformed HEAD, or a `gitdir:` pointer written into HEAD rather than `.git`.
+        None => worktree_segment(worktree),
     }
 }
 
@@ -454,10 +477,11 @@ fn main() {
         .and_then(|m| m.display_name)
         .unwrap_or_else(|| "Unknown".to_string());
 
-    let current_dir_full = root
-        .workspace
-        .and_then(|w| w.current_dir)
-        .unwrap_or_default();
+    // One move: the branch fallback needs git_worktree from the same Workspace.
+    let (current_dir_full, git_worktree) = match root.workspace {
+        Some(w) => (w.current_dir.unwrap_or_default(), w.git_worktree),
+        None => (String::new(), None),
+    };
 
     let effort_level = root.effort.and_then(|e| e.level);
 
@@ -490,7 +514,7 @@ fn main() {
         .unwrap_or(&current_dir_full);
 
     // Get git branch
-    let git_branch = read_git_branch();
+    let git_branch = read_git_branch(git_worktree.as_deref());
 
     // Effort level suffix (e.g. " high"), space-joined with no "|" separator
     let effort_suffix = match effort_level {
@@ -717,6 +741,26 @@ mod tests {
             }
         }
         assert_eq!(effort_color("something-new"), COLOR_CYAN, "unknown falls back");
+    }
+
+    /// Was unreachable before `truncate_ref` was split out of `read_git_branch`, which
+    /// reads the filesystem. The multi-byte case is the one that used to panic.
+    #[test]
+    fn refs_are_capped_by_chars_not_bytes() {
+        assert_eq!(truncate_ref("short"), "short");
+        let long = truncate_ref(&"a".repeat(BRANCH_MAX_CHARS + 10));
+        assert_eq!(long.chars().count(), BRANCH_MAX_CHARS);
+        assert!(long.ends_with('…'));
+        let wide = truncate_ref(&"ñ".repeat(BRANCH_MAX_CHARS + 5));
+        assert_eq!(wide.chars().count(), BRANCH_MAX_CHARS);
+    }
+
+    #[test]
+    fn worktree_is_the_last_resort() {
+        assert_eq!(worktree_segment(None), "", "outside a worktree, nothing");
+        assert_eq!(worktree_segment(Some("")), "", "empty is not a name");
+        assert!(worktree_segment(Some("my-feature")).contains("my-feature"));
+        assert!(worktree_segment(Some(&"w".repeat(60))).ends_with(&format!("…{}", COLOR_RESET)));
     }
 
     // --- Clock-dependent -----------------------------------------------------------

@@ -105,6 +105,22 @@ test: $(TARGET)
 	@tmp=$$(mktemp -d) && mkdir -p $$tmp/.git && echo 'gitdir: /some/worktree/path' > $$tmp/.git/HEAD && \
 	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q '🌿' \
 	  && echo "FAIL: gitdir pointer rendered a branch" || echo "PASS: gitdir pointer stays silent"; rm -rf $$tmp
+	@echo "Testing a real worktree (.git is a FILE) falls back to the worktree name..."
+	@tmp=$$(mktemp -d) && echo 'gitdir: /some/repo/.git/worktrees/feat' > $$tmp/.git && \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp","git_worktree":"my-feature"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q '🌿 .*my-feature' \
+	  && echo "PASS: worktree name shown when HEAD is unreadable" || echo "FAIL: worktree fallback missing"; rm -rf $$tmp
+	@echo "Testing a worktree-shaped .git without the field stays silent..."
+	@tmp=$$(mktemp -d) && echo 'gitdir: /some/repo/.git/worktrees/feat' > $$tmp/.git && \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q '🌿' \
+	  && echo "FAIL: rendered a branch with nothing to render" || echo "PASS: no field, no segment"; rm -rf $$tmp
+	@echo "Testing a plain non-git folder is unaffected by the fallback..."
+	@tmp=$$(mktemp -d) && \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q '🌿' \
+	  && echo "FAIL: non-git folder rendered a branch" || echo "PASS: non-git folder stays silent"; rm -rf $$tmp
+	@echo "Testing a real branch wins over the worktree field (fast path first)..."
+	@tmp=$$(mktemp -d) && mkdir -p $$tmp/.git && echo 'ref: refs/heads/real-branch' > $$tmp/.git/HEAD && \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp","git_worktree":"ignored-name"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q 'ignored-name' \
+	  && echo "FAIL: fallback overrode a readable HEAD" || echo "PASS: .git/HEAD takes precedence"; rm -rf $$tmp
 	@echo "Testing a normal ref still renders the branch name..."
 	@tmp=$$(mktemp -d) && mkdir -p $$tmp/.git && echo 'ref: refs/heads/some-branch' > $$tmp/.git/HEAD && \
 	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q 'some-branch' \
