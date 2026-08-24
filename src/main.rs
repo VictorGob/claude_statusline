@@ -7,8 +7,17 @@ const GIT_HEAD_PATH: &str = ".git/HEAD";
 const GIT_REF_PREFIX: &str = "ref: refs/heads/";
 
 const FIVE_HOUR_WINDOW_SECS: i64 = 18000;
-/// Ignore the first 5% of the window — the average is too noisy to mean anything.
-const BURN_MIN_ELAPSED_FRACTION: f64 = 0.05;
+/// Ignore the first 2% of the window (6 min). This is only a residual guard against a
+/// near-zero denominator and against `dry_in_suffix()` projecting off a two-minute
+/// sample — BURN_MIN_GAP_PCT below is what actually keeps the opening quiet.
+const BURN_MIN_ELAPSED_FRACTION: f64 = 0.02;
+/// A multiple alone is not enough to warn on. Early in the window the straight-line
+/// budget is near zero, so one point of measurement noise swings the ratio by ~0.6x;
+/// the *difference* stays well-behaved exactly where the quotient does not. Requiring
+/// both is what let the flat blackout above drop from 15 minutes to 6: a genuine 2x
+/// overspend now surfaces at 7 min, while sub-point drift never warns at all. Binds
+/// only early — an hour in, 1.15x is already 3 points of lead.
+const BURN_MIN_GAP_PCT: f64 = 1.0;
 /// Deliberately above 1.0: spending exactly on budget lands at 100% right as the
 /// window resets, which is fine. Warning there would be permanently on, and would
 /// flicker as the ratio crossed the threshold between refreshes.
@@ -211,7 +220,8 @@ fn effort_color(level: &str) -> &'static str {
 }
 
 /// Spend pace as a multiple of the 5h window's straight-line budget: 1.0 is exactly on
-/// pace, above 1.0 is burning too fast. None if not derivable.
+/// pace, above 1.0 is burning too fast. None when not derivable *or* when the lead over
+/// budget is under BURN_MIN_GAP_PCT, which is the same "stay quiet" answer to callers.
 ///
 /// Only the 5h window gets this treatment. A straight-line budget assumes uniform
 /// spending, which holds within a session but not across a week — a weekday-only
@@ -219,11 +229,18 @@ fn effort_color(level: &str) -> &'static str {
 fn burn_ratio(used_pct: f64, resets_at: Option<i64>) -> Option<f64> {
     let elapsed = window_elapsed_secs(resets_at)?;
     let expected_pct = elapsed / FIVE_HOUR_WINDOW_SECS as f64 * 100.0;
+    // None here means "nothing worth flagging", not "not derivable": being on or under
+    // budget lands in the same bucket as too little lead to trust. All three consumers
+    // — the label color, the icon, the projection — already treat None as "stay quiet",
+    // so gating once here keeps them moving together.
+    if used_pct - expected_pct < BURN_MIN_GAP_PCT {
+        return None;
+    }
     Some(used_pct / expected_pct)
 }
 
 /// Seconds elapsed into the 5h window. None when not derivable: missing/past
-/// resets_at, clock skew, or still inside the noisy opening 5%.
+/// resets_at, clock skew, or still inside the noisy opening 2%.
 fn window_elapsed_secs(resets_at: Option<i64>) -> Option<f64> {
     let resets_at = match resets_at {
         Some(v) if v > 0 => v,
@@ -724,8 +741,16 @@ mod tests {
         assert_eq!(
             window_elapsed_secs(resets_in(FIVE_HOUR_WINDOW_SECS - 60)),
             None,
-            "inside the noisy opening 5%"
+            "inside the noisy opening 2%"
         );
+        assert_eq!(
+            window_elapsed_secs(resets_in(FIVE_HOUR_WINDOW_SECS - 300)),
+            None,
+            "5m in is still under the 6m floor"
+        );
+        let early =
+            window_elapsed_secs(resets_in(FIVE_HOUR_WINDOW_SECS - 420)).expect("7m in clears it");
+        assert!((early - 420.0).abs() < 5.0, "got {}", early);
         let elapsed = window_elapsed_secs(resets_in(14400)).expect("1h in is derivable");
         assert!((elapsed - 3600.0).abs() < 5.0, "got {}", elapsed);
     }
@@ -736,11 +761,31 @@ mod tests {
         let ratio = burn_ratio(24.0, resets_in(14400)).expect("derivable");
         assert!((ratio - 1.2).abs() < 0.01, "got {}", ratio);
 
-        let on_pace = burn_ratio(20.0, resets_in(14400)).expect("derivable");
-        assert!((on_pace - 1.0).abs() < 0.01, "exactly on budget");
-        assert_eq!(burn_color(Some(on_pace)).0, "", "on budget must not warn");
-
         assert_eq!(burn_ratio(50.0, None), None, "no window, no ratio");
+    }
+
+    /// The gap gate. Both sides of BURN_MIN_GAP_PCT, on a 1h-elapsed window where the
+    /// straight-line budget is 20% and one point of lead is therefore the threshold.
+    #[test]
+    fn burn_ratio_needs_an_absolute_lead() {
+        let at = resets_in(14400);
+        assert_eq!(burn_ratio(20.5, at), None, "half a point of lead is noise");
+        let ratio = burn_ratio(21.5, at).expect("a point and a half clears the gate");
+        assert!((ratio - 1.075).abs() < 0.01, "got {}", ratio);
+
+        assert_eq!(burn_ratio(20.0, at), None, "on budget is not over");
+        assert_eq!(burn_ratio(5.0, at), None, "under budget is not a burn");
+        assert_eq!(burn_color(None).0, "", "and None must not warn");
+    }
+
+    /// What the gate buys: 7m in, the budget is 2.33%, so 5% used is 2.14x with 2.7
+    /// points of lead. The flat 15-minute blackout it replaced hid this entirely.
+    #[test]
+    fn burn_ratio_surfaces_early_overspend() {
+        let at = resets_in(FIVE_HOUR_WINDOW_SECS - 420);
+        let ratio = burn_ratio(5.0, at).expect("derivable 7m in");
+        assert!(ratio >= BURN_HIGH_RATIO, "got {}", ratio);
+        assert!(dry_in_suffix(5.0, at, Some(ratio)).contains("dry in"));
     }
 
     /// Confined to red so line 2 keeps its usual width at every other level.

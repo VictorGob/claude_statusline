@@ -145,6 +145,8 @@ function Invoke-Test {
 
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $in1h = $now + 14400    # 1h elapsed into the 5h window
+    $in7m = $now + 17580    # 7m elapsed, just past the 6m floor
+    $in16m = $now + 17040   # 16m elapsed, inside the gap gate's suppression zone
     $in2h30 = $now + 9000
     $in5d = $now + 432000   # 2d elapsed into the 7d window
 
@@ -211,6 +213,18 @@ function Invoke-Test {
         -PassMessage "1.50x stays yellow" -FailMessage "1.50x should be yellow"
     Assert-Output -Json $yellow -Needle "dry in" -ShouldContain $false `
         -PassMessage "no dry-in below red" -FailMessage "dry-in below red"
+
+    Write-Host "Testing the gap gate surfaces an early overspend (7m elapsed, 5% used = 2.14x)..."
+    Assert-Output `
+        -Json ('{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":5,"resets_at":' + $in7m + '}}}') `
+        -Needle "dry in" -ShouldContain $true `
+        -PassMessage "red 7m in, once past the 6m floor" -FailMessage "early overspend still blacked out"
+
+    Write-Host "Testing sub-point drift stays plain (16m elapsed, 6.3% used = 1.18x, gap 0.97)..."
+    Assert-Output `
+        -Json ('{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":6.3,"resets_at":' + $in16m + '}}}') `
+        -Needle "$ESC[33m" -ShouldContain $false `
+        -PassMessage "1.18x under the gap stays plain" -FailMessage "under a point of lead should not warn"
 
     Write-Host "Testing 7d never shows a burn flame (2d elapsed, 45% used)..."
     Assert-Output `
