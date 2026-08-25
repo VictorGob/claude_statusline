@@ -250,9 +250,11 @@ function Invoke-Test {
         -PassMessage "7d has no pace cue" -FailMessage "7d should not flag pace"
 
     # Code points, not literals, matching the flame assertions above — they all rely
-    # on the UTF-8 capture forced at the top of this file. 💾 is astral so it needs a
-    # surrogate pair; ⏳ and ⚡ are BMP and take a single char.
+    # on the UTF-8 capture forced at the top of this file. 💾, 🧊 and 🎫 are astral so
+    # they need surrogate pairs; ⏳ and ⚡ are BMP and take a single char.
     $Floppy = "$([char]0xD83D)$([char]0xDCBE)"
+    $Ice = "$([char]0xD83E)$([char]0xDDCA)"
+    $Ticket = "$([char]0xD83C)$([char]0xDFAB)"
     $Hourglass = "$([char]0x23F3)"
     $Bolt = "$([char]0x26A1)"
 
@@ -268,11 +270,20 @@ function Invoke-Test {
         -Needle "$ESC[31m$Floppy 20%" -ShouldContain $true `
         -PassMessage "red at 20% hit rate" -FailMessage "missing red on cache miss"
 
-    Write-Host "Testing cache indicator hidden below the context floor (10% context)..."
+    Write-Host "Testing the cache indicator is shown from the first turn (10% context)..."
+    $coldStart = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":10,"current_usage":{"cache_read_input_tokens":20000,"cache_creation_input_tokens":80000}}}'
+    Assert-Output -Json $coldStart -Needle "$Floppy 20%" -ShouldContain $true `
+        -PassMessage "cold-start miss is visible" -FailMessage "cache cue hidden at low context"
+
+    Write-Host "Testing a large cache write is flagged as a rebuild (80k written)..."
+    Assert-Output -Json $coldStart -Needle "${Ice}80k" -ShouldContain $true `
+        -PassMessage "rebuild marker shows the size written" -FailMessage "rebuild marker missing"
+
+    Write-Host "Testing a small cache write is not flagged (5k written)..."
     Assert-Output `
-        -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":10,"current_usage":{"cache_read_input_tokens":20000,"cache_creation_input_tokens":80000}}}' `
-        -Needle $Floppy -ShouldContain $false `
-        -PassMessage "no cache cue under 30% context" -FailMessage "cold start should not flag a miss"
+        -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":60,"current_usage":{"cache_read_input_tokens":95000,"cache_creation_input_tokens":5000}}}' `
+        -Needle $Ice -ShouldContain $false `
+        -PassMessage "no marker under 50k written" -FailMessage "a top-up is not a rebuild"
 
     Write-Host "Testing cache indicator hidden when current_usage is null (post-/compact)..."
     Assert-Output `
@@ -299,6 +310,61 @@ function Invoke-Test {
         -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":7200000,"total_api_duration_ms":18000000}}' `
         -Needle "${Bolt}100%" -ShouldContain $true `
         -PassMessage "activity clamped to 100%" -FailMessage "activity exceeded 100%"
+
+    # --- Context size -----------------------------------------------------------
+    # The size ladder is absolute. Every case below pairs a size with a percentage the
+    # other ladder would render differently, so none can pass from the wrong ladder.
+    $ctx = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":'
+
+    Write-Host "Testing context shows absolute tokens beside the percentage..."
+    Assert-Output -Json ($ctx + '{"used_percentage":42,"total_input_tokens":84000}}') `
+        -Needle "$Ticket 42% (84k)" -ShouldContain $true `
+        -PassMessage "token count shown" -FailMessage "token count missing"
+
+    Write-Host "Testing the percentage stands alone when no token count is sent..."
+    Assert-True ((Invoke-Statusline ($ctx + '{"used_percentage":42}}')) -match "$Ticket 42%\s*$") `
+        "bare percentage unchanged" "bare percentage altered"
+
+    Write-Host "Testing the size ladder: 199k at 30% is under the warn step..."
+    # Anchored to the start of a line: an unanchored escape check would match line 1's
+    # coloured directory and branch and never fail.
+    Assert-True ((Invoke-Statusline ($ctx + '{"used_percentage":30,"total_input_tokens":199000}}')) -match "(?m)^$Ticket 30% \(199k\)") `
+        "199k at 30% stays plain" "199k should be uncoloured at 30%"
+
+    Write-Host "Testing the size ladder: 200k at 30% warns where the percentage sees nothing..."
+    Assert-Output -Json ($ctx + '{"used_percentage":30,"total_input_tokens":200000}}') `
+        -Needle "$ESC[33m$Ticket" -ShouldContain $true `
+        -PassMessage "yellow at 200k" -FailMessage "no warn step at 200k"
+
+    Write-Host "Testing the size ladder: 300k at 30% is red..."
+    Assert-Output -Json ($ctx + '{"used_percentage":30,"total_input_tokens":300000}}') `
+        -Needle "$ESC[31m$Ticket" -ShouldContain $true `
+        -PassMessage "red at 300k" -FailMessage "no red at 300k"
+
+    Write-Host "Testing the size ladder: 500k at 50% is bold red..."
+    Assert-Output -Json ($ctx + '{"used_percentage":50,"total_input_tokens":500000}}') `
+        -Needle "$ESC[1;31m$Ticket" -ShouldContain $true `
+        -PassMessage "bold red at 500k" -FailMessage "no critical step at 500k"
+
+    Write-Host "Testing the louder ladder wins: 184k at 92% is red from the percentage..."
+    Assert-Output -Json ($ctx + '{"used_percentage":92,"total_input_tokens":184000}}') `
+        -Needle "$ESC[31m$Ticket" -ShouldContain $true `
+        -PassMessage "a full window still colours under the warn step" -FailMessage "size-wins-outright regression"
+
+    Write-Host "Testing a full small window is not the critical step (95% of 50k)..."
+    Assert-Output -Json ($ctx + '{"used_percentage":95,"total_input_tokens":50000}}') `
+        -Needle "$ESC[1;31m$Ticket" -ShouldContain $false `
+        -PassMessage "95% of 50k is red, not bold" -FailMessage "a full small window is not critical"
+
+    Write-Host "Testing a missing token count falls back to used_percentage (92%, no tokens)..."
+    Assert-Output -Json ($ctx + '{"used_percentage":92}}') `
+        -Needle "$ESC[31m$Ticket" -ShouldContain $true `
+        -PassMessage "falls back to plain red" -FailMessage "fallback colouring lost"
+
+    Write-Host "Testing the 5h bar keeps the old bands at 75% (pct_color untouched)..."
+    Assert-Output -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":75}}}' `
+        -Needle "$ESC[31m" -ShouldContain $false `
+        -PassMessage "75% quota is still yellow" -FailMessage "quota bars moved with the context bands"
 
     # --- Detached HEAD ----------------------------------------------------------
     $headJson = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}'
