@@ -25,14 +25,43 @@ const BURN_WARN_RATIO: f64 = 1.15;
 const BURN_FIRE_RATIO: f64 = 1.4;
 const BURN_HIGH_RATIO: f64 = 1.75;
 
-/// Below this much context the cache indicator stays hidden. A cold start is all
-/// cache writes by construction, so an ungated indicator would sit red on every
-/// session opening. Gating on context size rather than on `read > 0` keeps a
-/// genuine post-TTL 0% visible, which is the event actually worth seeing.
-const CACHE_MIN_CONTEXT_PCT: f64 = 30.0;
 /// These run backwards from every other threshold here: high is good.
 const CACHE_WARN_RATIO: f64 = 0.85;
 const CACHE_HIGH_RATIO: f64 = 0.60;
+/// A turn that writes more than this into the cache rebuilt the prefix rather than
+/// topping it up, and a write token costs roughly 12x a read one. The ratio alone
+/// cannot say this: 20% off a small turn and 20% off a 300k rebuild render
+/// identically, and only one of them is worth clearing the session over.
+const CACHE_REBUILD_TOKENS: u64 = 50_000;
+
+/// The context size ladder, in tokens of billed input per turn. Measured, not picked:
+/// over 5,384 requests / 1,043M billed input tokens in one week, the share of turns
+/// above each line was 37% / 23% / ~9%, and the turns above 300k alone carried half of
+/// all billed input.
+///
+/// Three steps rather than one because a single alarm is a cliff — it has no "getting
+/// close" state, so the first thing it ever says is that you are already past the
+/// point of acting. The warn step also keeps the size ladder alive on a 200k-window
+/// model, where the red step is effectively unreachable.
+///
+/// Bounded on both sides by the same data:
+/// - Floor — p10 of billed input per turn is 44k and p25 is 79k. Base context makes
+///   sub-100k unreachable, so nothing below roughly 150k is actionable at all. 150k
+///   itself is the *median* turn (146k), which is why it is not the warn step: a line
+///   there fires on half of everything and describes the distribution instead of
+///   marking anything in it.
+/// - Ceiling — counting only the excess above the line, a hard cap at the red step
+///   would remove 15% of billed input (21% at 250k, 30% at 200k). The status line
+///   saves none of that by itself; it is instrumentation, and exists so those turns
+///   are visible while clearing is still a decision that can be made.
+///
+/// Absolute, never a fraction of the window: what a turn costs is the whole context
+/// re-sent, and `context_window_size` does not bound it — the largest turn in that
+/// week measured 659k. The critical step is the one figure here read off the end of
+/// the measured table rather than out of it, so treat it as the softest of the three.
+const CONTEXT_WARN_TOKENS: u64 = 200_000;
+const CONTEXT_HIGH_TOKENS: u64 = 300_000;
+const CONTEXT_CRITICAL_TOKENS: u64 = 500_000;
 
 /// Under a minute there is nothing to say about a session's age.
 const AGE_MIN_SECS: u64 = 60;
@@ -56,6 +85,11 @@ const GIT_SHORT_SHA_LEN: usize = 7;
 const COLOR_GREEN: &str = "\x1b[32m";
 const COLOR_YELLOW: &str = "\x1b[33m";
 const COLOR_RED: &str = "\x1b[31m";
+/// The top of the context size ladder, and nothing else — `pct_color` never produces
+/// it. Deliberately a step beyond the plain red that the percentage reaches at 90%: a
+/// full window and an expensive turn are different messages, and on a large-window
+/// model they need not coincide at all.
+const COLOR_RED_BOLD: &str = "\x1b[1;31m";
 const COLOR_CYAN: &str = "\x1b[36m";
 const COLOR_BLUE: &str = "\x1b[34m";
 const COLOR_MAGENTA: &str = "\x1b[35m";
@@ -92,6 +126,9 @@ struct Workspace {
 #[derive(Deserialize)]
 struct ContextWindow {
     used_percentage: Option<f64>,
+    /// Input billed on the most recent turn — fresh input plus both cache halves.
+    /// The percentage is the display; this is what the keep-or-clear call is made on.
+    total_input_tokens: Option<u64>,
     /// The most recent response's usage, not a session total. Explicitly null
     /// before the first API call and again after /compact — Option covers both
     /// that and the field being absent.
@@ -338,20 +375,52 @@ fn cache_hit_ratio(usage: &CurrentUsage) -> Option<f64> {
 }
 
 /// "💾 91%" — how much of this turn's context was re-read instead of rebuilt.
-/// A cache write costs roughly 12x a cache read, so this tracks what the turn
-/// cost. Empty below CACHE_MIN_CONTEXT_PCT, where the number is all startup
-/// writes and a rebuild is cheap anyway.
-fn cache_suffix(used_pct: Option<f64>, usage: Option<&CurrentUsage>) -> String {
-    match used_pct {
-        Some(p) if p >= CACHE_MIN_CONTEXT_PCT => {}
-        _ => return String::new(),
-    }
-    let ratio = match usage.and_then(cache_hit_ratio) {
+/// A cache write costs roughly 12x a cache read, so this tracks what the turn cost.
+/// Shown from the first turn: this used to sit behind a context floor on the grounds
+/// that a cold start is all writes by construction and cheap to redo, but a cold
+/// start at full context size is precisely the expensive event worth catching.
+fn cache_suffix(usage: Option<&CurrentUsage>) -> String {
+    let usage = match usage {
+        Some(u) => u,
+        None => return String::new(),
+    };
+    let ratio = match cache_hit_ratio(usage) {
         Some(r) => r,
         None => return String::new(),
     };
     let (color, reset) = cache_color(ratio);
-    format!("{}💾 {:.0}%{}", color, ratio * 100.0, reset)
+    format!(
+        "{}💾 {:.0}%{}{}",
+        color,
+        ratio * 100.0,
+        reset,
+        rebuild_marker(usage)
+    )
+}
+
+/// " 🧊200k" when this turn wrote more than CACHE_REBUILD_TOKENS into the cache:
+/// the prefix was rebuilt from cold, and the size is the cost. Rendered beside the
+/// ratio rather than folded into it, since the two answer different questions — how
+/// much of the turn missed, and how much that miss actually re-sent.
+fn rebuild_marker(usage: &CurrentUsage) -> String {
+    match usage.cache_creation_input_tokens {
+        Some(n) if n > CACHE_REBUILD_TOKENS => {
+            format!(" {}🧊{}{}", COLOR_RED, format_tokens(n), COLOR_RESET)
+        }
+        _ => String::new(),
+    }
+}
+
+/// Token counts at a glance: "84k", "1.2M". Whole thousands under a million, where
+/// a hundred tokens either way changes nothing about the decision being made.
+fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        n.to_string()
+    }
 }
 
 /// Colors the cache ratio. Inverted against pct_color: high is healthy.
@@ -418,7 +487,60 @@ fn session_suffix(cost: &Cost) -> String {
     out
 }
 
+/// Colors the context segment as the louder of two ladders, because they answer
+/// different questions and either can be the one worth acting on: the size ladder says
+/// what this turn costs, the percentage says how much room is left. Taking the more
+/// severe rather than letting size win outright is what keeps a nearly-full small
+/// window coloured — 184k of a 200k window is 92% and still under the warn step.
+///
+/// It needs its own function because a size is something a percentage cannot express,
+/// and `pct_color` is shared with the 5h and 7d bars, which must not gain these bands.
+///
+/// When the payload omits `total_input_tokens` the size ladder contributes nothing and
+/// the percentage stands alone. Falling back rather than reconstructing a size from
+/// the percentage is deliberate: the percentage cannot say how large the context is,
+/// and a number invented from it would be wrong by whatever factor the real window
+/// differs from the one assumed.
+fn context_color(pct: f64, tokens: Option<u64>) -> (&'static str, &'static str) {
+    let by_pct = pct_color(pct);
+    let by_size = tokens.map_or(("", ""), token_color);
+    if severity(by_size.0) >= severity(by_pct.0) {
+        by_size
+    } else {
+        by_pct
+    }
+}
+
+/// The size ladder alone. The window is not consulted — see the CONTEXT_*_TOKENS
+/// constants for why a fraction of it is the wrong shape for this.
+fn token_color(tokens: u64) -> (&'static str, &'static str) {
+    if tokens >= CONTEXT_CRITICAL_TOKENS {
+        (COLOR_RED_BOLD, COLOR_RESET)
+    } else if tokens >= CONTEXT_HIGH_TOKENS {
+        (COLOR_RED, COLOR_RESET)
+    } else if tokens >= CONTEXT_WARN_TOKENS {
+        (COLOR_YELLOW, COLOR_RESET)
+    } else {
+        ("", "")
+    }
+}
+
+/// Ranks the colours so two ladders can be compared. Ordering only — it exists to pick
+/// between them, and deliberately knows nothing about which ladder produced what.
+fn severity(color: &str) -> u8 {
+    if color == COLOR_RED_BOLD {
+        3
+    } else if color == COLOR_RED {
+        2
+    } else if color == COLOR_YELLOW {
+        1
+    } else {
+        0
+    }
+}
+
 /// Returns (color, reset) escape codes for a percentage: yellow at 60%, red at 90%.
+/// The rate-limit bars only; the context segment has its own bands above.
 fn pct_color(pct: f64) -> (&'static str, &'static str) {
     if pct >= 90.0 {
         (COLOR_RED, COLOR_RESET)
@@ -490,6 +612,7 @@ fn main() {
     let current_usage = context_window
         .as_ref()
         .and_then(|c| c.current_usage.as_ref());
+    let total_input_tokens = context_window.as_ref().and_then(|c| c.total_input_tokens);
 
     let (five_hour_pct, five_hour_resets_at) = root
         .rate_limits
@@ -544,12 +667,20 @@ fn main() {
     let mut has_content = false;
 
     if let Some(pct) = used_pct {
-        let (color, reset) = pct_color(pct);
-        line2.push_str(&format!("{}🎫 {:.0}%{}", color, pct, reset));
+        let (color, reset) = context_color(pct, total_input_tokens);
+        // The absolute size is the number the clear-or-continue rule is stated in;
+        // the percentage only says how much window is left, which is a different
+        // question once a turn costs hundreds of thousands regardless of how small
+        // the question is.
+        let tokens = match total_input_tokens {
+            Some(n) => format!(" ({})", format_tokens(n)),
+            None => String::new(),
+        };
+        line2.push_str(&format!("{}🎫 {:.0}%{}{}", color, pct, tokens, reset));
         has_content = true;
     }
 
-    let cache = cache_suffix(used_pct, current_usage);
+    let cache = cache_suffix(current_usage);
     if !cache.is_empty() {
         if has_content {
             line2.push_str(" | ");
@@ -671,15 +802,123 @@ mod tests {
         assert_eq!(cache_hit_ratio(&usage(Some(10), None)), None, "no write field");
     }
 
-    /// The floor exists so a cold start — all cache writes by construction — doesn't sit
-    /// red at the top of every session.
+    /// No context floor any more: a cold start at full size is the expensive event,
+    /// and the floor that used to hide it hid exactly that turn.
     #[test]
-    fn cache_suffix_respects_the_context_floor() {
-        let u = usage(Some(20000), Some(80000));
-        assert_eq!(cache_suffix(Some(29.9), Some(&u)), "");
-        assert!(cache_suffix(Some(CACHE_MIN_CONTEXT_PCT), Some(&u)).contains("💾"));
-        assert_eq!(cache_suffix(None, Some(&u)), "", "no context reading");
-        assert_eq!(cache_suffix(Some(60.0), None), "", "post-/compact null usage");
+    fn cache_suffix_shows_from_the_first_turn() {
+        let cold = usage(Some(0), Some(120_000));
+        let out = cache_suffix(Some(&cold));
+        assert!(out.contains("💾 0%"), "got {}", out);
+        assert!(out.starts_with(COLOR_RED), "a total miss is red: {}", out);
+        assert_eq!(cache_suffix(None), "", "post-/compact null usage");
+        assert_eq!(cache_suffix(Some(&usage(Some(0), Some(0)))), "", "no tokens yet");
+    }
+
+    /// Both sides of the rebuild threshold. The ratio cannot carry this on its own:
+    /// 20% off a 5k top-up and 20% off a 300k rebuild render identically.
+    #[test]
+    fn rebuild_marker_boundaries() {
+        assert_eq!(
+            rebuild_marker(&usage(Some(10), Some(CACHE_REBUILD_TOKENS))),
+            "",
+            "exactly at the threshold is still a top-up"
+        );
+        let over = rebuild_marker(&usage(Some(10), Some(CACHE_REBUILD_TOKENS + 1)));
+        assert!(over.contains("🧊") && over.contains("50k"), "got {}", over);
+        assert_eq!(rebuild_marker(&usage(Some(10), None)), "", "no write field");
+
+        // And it rides along on the suffix, not just in isolation.
+        assert!(cache_suffix(Some(&usage(Some(20_000), Some(80_000)))).contains("🧊80k"));
+        assert!(!cache_suffix(Some(&usage(Some(95_000), Some(5_000)))).contains("🧊"));
+    }
+
+    /// Both sides of all three size steps, in isolation from the percentage ladder.
+    #[test]
+    fn token_color_boundaries() {
+        assert_eq!(token_color(CONTEXT_WARN_TOKENS - 1).0, "");
+        assert_eq!(token_color(CONTEXT_WARN_TOKENS).0, COLOR_YELLOW);
+        assert_eq!(token_color(CONTEXT_HIGH_TOKENS - 1).0, COLOR_YELLOW);
+        assert_eq!(token_color(CONTEXT_HIGH_TOKENS).0, COLOR_RED);
+        assert_eq!(token_color(CONTEXT_CRITICAL_TOKENS - 1).0, COLOR_RED);
+        assert_eq!(token_color(CONTEXT_CRITICAL_TOKENS).0, COLOR_RED_BOLD);
+        assert_eq!(token_color(659_000).0, COLOR_RED_BOLD, "the largest turn measured");
+
+        // Literals, deliberately. Every assertion above is written in terms of the
+        // constants, so it holds whatever they say and pins nothing; these are what
+        // fail when a step moves.
+        assert_eq!(token_color(199_999).0, "");
+        assert_eq!(token_color(200_000).0, COLOR_YELLOW);
+        assert_eq!(token_color(299_999).0, COLOR_YELLOW);
+        assert_eq!(token_color(300_000).0, COLOR_RED);
+        assert_eq!(token_color(499_999).0, COLOR_RED);
+        assert_eq!(token_color(500_000).0, COLOR_RED_BOLD);
+    }
+
+    /// The size ladder is absolute, and that is the whole reason it exists: 300k is 30%
+    /// of a 1M window, which every percentage band here calls perfectly healthy. Each
+    /// case pairs a size with a percentage the other ladder would render plain, so a
+    /// pass cannot come from the wrong ladder having coloured it.
+    #[test]
+    fn size_ladder_is_absolute_not_a_window_fraction() {
+        assert_eq!(pct_color(30.0).0, "", "the percentage alone sees nothing wrong");
+        assert_eq!(context_color(30.0, Some(CONTEXT_WARN_TOKENS)).0, COLOR_YELLOW);
+        assert_eq!(context_color(30.0, Some(CONTEXT_HIGH_TOKENS)).0, COLOR_RED);
+        assert_eq!(context_color(30.0, Some(CONTEXT_CRITICAL_TOKENS)).0, COLOR_RED_BOLD);
+    }
+
+    /// The louder of the two wins, in both directions. The second case is the one a
+    /// size-wins-outright rule would get wrong: 184k of a 200k window is 92% full and
+    /// still below the warn step, so letting size decide would render it plain.
+    #[test]
+    fn context_color_takes_the_more_severe_ladder() {
+        // Size louder than percentage.
+        assert_eq!(context_color(30.0, Some(300_000)), (COLOR_RED, COLOR_RESET));
+        assert_eq!(pct_color(30.0).0, "");
+
+        // Percentage louder than size.
+        assert_eq!(context_color(92.0, Some(184_000)), (COLOR_RED, COLOR_RESET));
+        assert_eq!(token_color(184_000).0, "", "under the warn step");
+        assert_eq!(context_color(95.0, Some(50_000)), pct_color(95.0));
+
+        // Equal severity resolves to the same colour either way.
+        assert_eq!(context_color(90.0, Some(300_000)), (COLOR_RED, COLOR_RESET));
+    }
+
+    /// Ordering only. A bad rank here would silently pick the quieter ladder.
+    #[test]
+    fn severity_ranks_the_ladder() {
+        assert!(severity(COLOR_RED_BOLD) > severity(COLOR_RED));
+        assert!(severity(COLOR_RED) > severity(COLOR_YELLOW));
+        assert!(severity(COLOR_YELLOW) > severity(""));
+    }
+
+    /// Missing token count leaves the percentage standing alone, rather than
+    /// reconstructing a size from it — which would need a window to assume.
+    #[test]
+    fn context_color_falls_back_without_a_token_count() {
+        for pct in [0.0, 59.9, 60.0, 89.9, 90.0, 100.0] {
+            assert_eq!(context_color(pct, None), pct_color(pct), "at {}%", pct);
+        }
+    }
+
+    /// pct_color is shared with the 5h and 7d bars, so it must be exactly as it was.
+    #[test]
+    fn quota_bands_are_untouched_by_the_size_ladder() {
+        assert_eq!(pct_color(59.9).0, "");
+        assert_eq!(pct_color(60.0).0, COLOR_YELLOW);
+        assert_eq!(pct_color(89.9).0, COLOR_YELLOW);
+        assert_eq!(pct_color(90.0).0, COLOR_RED, "plain red, never the alarm bold");
+    }
+
+    #[test]
+    fn format_tokens_units() {
+        assert_eq!(format_tokens(0), "0");
+        assert_eq!(format_tokens(999), "999");
+        assert_eq!(format_tokens(1_000), "1k");
+        assert_eq!(format_tokens(84_000), "84k");
+        assert_eq!(format_tokens(999_999), "999k", "whole thousands, not rounded up");
+        assert_eq!(format_tokens(1_000_000), "1.0M");
+        assert_eq!(format_tokens(1_250_000), "1.2M");
     }
 
     #[test]
