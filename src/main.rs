@@ -63,6 +63,19 @@ const CONTEXT_WARN_TOKENS: u64 = 200_000;
 const CONTEXT_HIGH_TOKENS: u64 = 300_000;
 const CONTEXT_CRITICAL_TOKENS: u64 = 500_000;
 
+/// The occupancy ladder, as a fraction of whatever window the model has — headroom,
+/// where the token steps above are spend. Read off the same distribution: turn growth
+/// is p25 = 79k / p10 = 44k, so on a 200k window under 20% free holds a turn or two
+/// (warn) and under 10% free less than one small turn (red). Never red-bold, which is
+/// the size ladder's alone.
+///
+/// Not `pct_color`'s 60%, which is wrong both ways: on a 200k window it fires at 120k,
+/// under the *median* turn (146k) — the permanently-on warning CONTEXT_*_TOKENS and
+/// BURN_WARN_RATIO both reject — and on a 1M window it is 600k, past the bold-red size
+/// step, so the ladder never decides anything.
+const CONTEXT_WARN_PCT: f64 = 80.0;
+const CONTEXT_HIGH_PCT: f64 = 90.0;
+
 /// Under a minute there is nothing to say about a session's age.
 const AGE_MIN_SECS: u64 = 60;
 const AGE_WARN_SECS: u64 = 4 * 3600;
@@ -494,7 +507,8 @@ fn session_suffix(cost: &Cost) -> String {
 /// window coloured — 184k of a 200k window is 92% and still under the warn step.
 ///
 /// It needs its own function because a size is something a percentage cannot express,
-/// and `pct_color` is shared with the 5h and 7d bars, which must not gain these bands.
+/// and `pct_color` is shared with the 5h and 7d bars, which must neither gain these
+/// bands nor impose their own — hence `context_pct_color`.
 ///
 /// When the payload omits `total_input_tokens` the size ladder contributes nothing and
 /// the percentage stands alone. Falling back rather than reconstructing a size from
@@ -502,12 +516,23 @@ fn session_suffix(cost: &Cost) -> String {
 /// and a number invented from it would be wrong by whatever factor the real window
 /// differs from the one assumed.
 fn context_color(pct: f64, tokens: Option<u64>) -> (&'static str, &'static str) {
-    let by_pct = pct_color(pct);
+    let by_pct = context_pct_color(pct);
     let by_size = tokens.map_or(("", ""), token_color);
     if severity(by_size.0) >= severity(by_pct.0) {
         by_size
     } else {
         by_pct
+    }
+}
+
+/// The occupancy ladder alone — steps and their derivation at CONTEXT_*_PCT.
+fn context_pct_color(pct: f64) -> (&'static str, &'static str) {
+    if pct >= CONTEXT_HIGH_PCT {
+        (COLOR_RED, COLOR_RESET)
+    } else if pct >= CONTEXT_WARN_PCT {
+        (COLOR_YELLOW, COLOR_RESET)
+    } else {
+        ("", "")
     }
 }
 
@@ -540,7 +565,8 @@ fn severity(color: &str) -> u8 {
 }
 
 /// Returns (color, reset) escape codes for a percentage: yellow at 60%, red at 90%.
-/// The rate-limit bars only; the context segment has its own bands above.
+/// The rate-limit bars only; the context segment's own bands are in
+/// `context_pct_color`.
 fn pct_color(pct: f64) -> (&'static str, &'static str) {
     if pct >= 90.0 {
         (COLOR_RED, COLOR_RESET)
@@ -896,9 +922,33 @@ mod tests {
     /// reconstructing a size from it — which would need a window to assume.
     #[test]
     fn context_color_falls_back_without_a_token_count() {
-        for pct in [0.0, 59.9, 60.0, 89.9, 90.0, 100.0] {
-            assert_eq!(context_color(pct, None), pct_color(pct), "at {}%", pct);
+        for pct in [0.0, 59.9, 60.0, 79.9, 80.0, 89.9, 90.0, 100.0] {
+            assert_eq!(
+                context_color(pct, None),
+                context_pct_color(pct),
+                "at {}%",
+                pct
+            );
         }
+    }
+
+    /// Literals, not the constants — `context_pct_color(CONTEXT_WARN_PCT)` would pass
+    /// through any move of the step. Both sides of each boundary, so a nudge fails.
+    #[test]
+    fn context_pct_boundaries() {
+        assert_eq!(context_pct_color(79.9).0, "");
+        assert_eq!(context_pct_color(80.0).0, COLOR_YELLOW);
+        assert_eq!(context_pct_color(89.9).0, COLOR_YELLOW);
+        assert_eq!(context_pct_color(90.0).0, COLOR_RED, "never the alarm bold");
+    }
+
+    /// The reason the band exists: on a 200k window the quota bars' 60% is 120k, below
+    /// the median turn (146k), so the segment used to sit yellow through ordinary work.
+    #[test]
+    fn ordinary_work_on_a_small_window_stays_plain() {
+        assert_eq!(context_color(60.0, Some(120_000)).0, "");
+        assert_eq!(pct_color(60.0).0, COLOR_YELLOW, "the quota bars still warn here");
+        assert_eq!(context_color(73.0, Some(146_000)).0, "", "the median turn");
     }
 
     /// pct_color is shared with the 5h and 7d bars, so it must be exactly as it was.
