@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const GIT_HEAD_PATH: &str = ".git/HEAD";
 const GIT_REF_PREFIX: &str = "ref: refs/heads/";
+const GITDIR_PREFIX: &str = "gitdir: ";
 
 const FIVE_HOUR_WINDOW_SECS: i64 = 18000;
 /// Ignore the first 2% of the window (6 min). This is only a residual guard against a
@@ -89,6 +90,10 @@ const ACTIVITY_WARN_PCT: f64 = 5.0;
 /// prompt a /clear off the right edge. Cut the tail rather than the middle: the head
 /// is where the ticket id lives, which is what identifies the branch at a glance.
 const BRANCH_MAX_CHARS: usize = 40;
+/// Replaces 🌿 for a branch checked out in a linked worktree, where edits don't reach
+/// the main checkout. An icon rather than text, so the name keeps all of BRANCH_MAX_CHARS.
+const WORKTREE_ICON: &str = "🔀";
+const BRANCH_ICON: &str = "🌿";
 
 /// A full object id as stored in `.git/HEAD` when detached, and the prefix shown for it.
 /// Slicing by byte is safe only because the value is verified all-ASCII-hex first.
@@ -234,42 +239,66 @@ fn truncate_ref(name: &str) -> String {
     }
 }
 
-/// Last resort when `.git/HEAD` yields no branch. In a linked worktree it cannot even be
-/// opened — `.git` is a *file* holding a `gitdir:` pointer, so the read fails with
-/// ENOTDIR — and `workspace.git_worktree` is already in the payload, so following that
-/// pointer would buy a second lookup for nothing. Names the *worktree*, not the branch in
-/// it; rendered plainly anyway, since unlike a bare SHA it can't be mistaken for a ref.
+/// Last resort when no HEAD yields a branch: neither `.git/HEAD` nor the HEAD behind a
+/// worktree's `gitdir:` pointer could be read and parsed. Names the *worktree*, not the
+/// branch in it; rendered plainly anyway, since unlike a bare SHA it can't be mistaken
+/// for a ref. The field is present only in a worktree, so it carries the marker.
 fn worktree_segment(worktree: Option<&str>) -> String {
     match worktree {
-        Some(name) if !name.is_empty() => branch_segment(name),
+        Some(name) if !name.is_empty() => branch_segment(name, true),
         _ => String::new(),
     }
 }
 
-/// The `🌿` segment for a ref name: capped, coloured, with its leading separator.
-fn branch_segment(name: &str) -> String {
-    let shown = truncate_ref(name);
-    format!(" | 🌿 {}{}{}", COLOR_GREEN, shown, COLOR_RESET)
+fn branch_icon(in_worktree: bool) -> &'static str {
+    if in_worktree {
+        WORKTREE_ICON
+    } else {
+        BRANCH_ICON
+    }
 }
 
-fn read_git_branch(worktree: Option<&str>) -> String {
-    let content = match std::fs::read_to_string(GIT_HEAD_PATH) {
-        Ok(c) => c,
-        // Not a git dir, or a worktree where `.git` is a file. Outside a worktree the
+/// The branch segment for a ref name: capped, coloured, with its leading separator, and
+/// WORKTREE_ICON in place of 🌿 in a linked worktree.
+fn branch_segment(name: &str, in_worktree: bool) -> String {
+    let shown = truncate_ref(name);
+    format!(" | {} {}{}{}", branch_icon(in_worktree), COLOR_GREEN, shown, COLOR_RESET)
+}
+
+/// Reads the HEAD governing `dir`. In a linked worktree `.git` is a *file* holding a
+/// `gitdir:` pointer, so `.git/HEAD` fails with ENOTDIR; the pointer leads to the
+/// worktree's own HEAD, which names its branch. Git 2.48+ writes the pointer relative
+/// under `worktree.useRelativePaths`; `join` resolves that against `dir` and leaves an
+/// absolute pointer untouched. The flag is true when the HEAD came through the pointer.
+fn read_head(dir: &Path) -> Option<(String, bool)> {
+    if let Ok(c) = std::fs::read_to_string(dir.join(GIT_HEAD_PATH)) {
+        return Some((c, false));
+    }
+    let pointer = std::fs::read_to_string(dir.join(".git")).ok()?;
+    let gitdir = pointer.lines().next()?.strip_prefix(GITDIR_PREFIX)?;
+    let head = std::fs::read_to_string(dir.join(gitdir).join("HEAD")).ok()?;
+    Some((head, true))
+}
+
+fn read_git_branch(dir: &Path, worktree: Option<&str>) -> String {
+    let (content, in_worktree) = match read_head(dir) {
+        Some(c) => c,
+        // Not a git dir, or a worktree pointer leading nowhere. Outside a worktree the
         // field is absent, so a plain folder returns the same empty string as before.
-        Err(_) => return worktree_segment(worktree),
+        None => return worktree_segment(worktree),
     };
     let line = content.lines().next().unwrap_or("");
 
     match line.strip_prefix(GIT_REF_PREFIX) {
-        Some(branch) => branch_segment(branch),
+        Some(branch) => branch_segment(branch, in_worktree),
         // Detached HEAD: the file holds a raw object id instead of a ref, and rendering
         // nothing would go quiet in exactly the state most likely to leave you unsure
         // where you are. The '@' marks it as a commit rather than a branch that happens
         // to be named like hex, echoing git's own "HEAD detached at abc1234".
         None if line.len() == GIT_SHA_LEN && line.bytes().all(|b| b.is_ascii_hexdigit()) => {
             format!(
-                " | 🌿 {}@{}{}",
+                " | {} {}@{}{}",
+                branch_icon(in_worktree),
                 COLOR_GREEN,
                 &line[..GIT_SHORT_SHA_LEN],
                 COLOR_RESET
@@ -663,7 +692,7 @@ fn main() {
         .unwrap_or(&current_dir_full);
 
     // Get git branch
-    let git_branch = read_git_branch(git_worktree.as_deref());
+    let git_branch = read_git_branch(Path::new("."), git_worktree.as_deref());
 
     // Effort level suffix (e.g. " high"), space-joined with no "|" separator
     let effort_suffix = match effort_level {
@@ -1037,11 +1066,21 @@ mod tests {
     #[test]
     fn refs_are_capped_by_chars_not_bytes() {
         assert_eq!(truncate_ref("short"), "short");
-        let long = truncate_ref(&"a".repeat(BRANCH_MAX_CHARS + 10));
-        assert_eq!(long.chars().count(), BRANCH_MAX_CHARS);
+        let long = truncate_ref(&"a".repeat(50));
+        assert_eq!(long.chars().count(), 40);
         assert!(long.ends_with('…'));
-        let wide = truncate_ref(&"ñ".repeat(BRANCH_MAX_CHARS + 5));
-        assert_eq!(wide.chars().count(), BRANCH_MAX_CHARS);
+        let wide = truncate_ref(&"ñ".repeat(45));
+        assert_eq!(wide.chars().count(), 40);
+    }
+
+    /// A worktree swaps the icon and keeps the full 40-char cap for the name.
+    #[test]
+    fn worktree_swaps_the_icon() {
+        let plain = branch_segment("short", false);
+        assert!(plain.starts_with(" | 🌿 ") && !plain.contains('🔀'), "got {:?}", plain);
+        let wt = branch_segment(&"b".repeat(60), true);
+        assert!(wt.starts_with(" | 🔀 ") && !wt.contains('🌿'), "got {:?}", wt);
+        assert!(wt.contains(&format!("{}…", "b".repeat(39))), "cap shrank: {:?}", wt);
     }
 
     #[test]
@@ -1049,7 +1088,79 @@ mod tests {
         assert_eq!(worktree_segment(None), "", "outside a worktree, nothing");
         assert_eq!(worktree_segment(Some("")), "", "empty is not a name");
         assert!(worktree_segment(Some("my-feature")).contains("my-feature"));
+        assert!(worktree_segment(Some("my-feature")).starts_with(" | 🔀 "));
         assert!(worktree_segment(Some(&"w".repeat(60))).ends_with(&format!("…{}", COLOR_RESET)));
+    }
+
+    /// A fresh directory per test, so tests running in parallel never share one.
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("statusline_{}_{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Lays out a linked worktree: `wt/.git` is a file pointing at `repo/.git/worktrees/wt`,
+    /// whose HEAD holds `head`. Returns the worktree directory.
+    fn linked_worktree(root: &Path, pointer: &str, head: &str) -> std::path::PathBuf {
+        let gitdir = root.join("repo/.git/worktrees/wt");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::write(gitdir.join("HEAD"), head).unwrap();
+        let wt = root.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", pointer)).unwrap();
+        wt
+    }
+
+    #[test]
+    fn worktree_branch_via_absolute_gitdir() {
+        let root = scratch_dir("wt_abs");
+        let pointer = root.join("repo/.git/worktrees/wt");
+        let wt = linked_worktree(&root, pointer.to_str().unwrap(), "ref: refs/heads/real-branch\n");
+        let seg = read_git_branch(&wt, Some("WT-NAME"));
+        assert!(seg.contains("real-branch"), "got {:?}", seg);
+        assert!(seg.starts_with(" | 🔀 "), "worktree not marked: {:?}", seg);
+        assert!(!seg.contains("WT-NAME"), "worktree name shown instead: {:?}", seg);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn worktree_branch_via_relative_gitdir() {
+        let root = scratch_dir("wt_rel");
+        let wt = linked_worktree(&root, "../repo/.git/worktrees/wt", "ref: refs/heads/rel-branch\n");
+        assert!(read_git_branch(&wt, Some("wt")).contains("rel-branch"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn worktree_detached_head_shows_short_sha() {
+        let root = scratch_dir("wt_detached");
+        let sha = "1234567890abcdef1234567890abcdef12345678";
+        let wt = linked_worktree(&root, "../repo/.git/worktrees/wt", &format!("{}\n", sha));
+        let seg = read_git_branch(&wt, Some("wt"));
+        assert!(seg.starts_with(" | 🔀 ") && seg.contains("@1234567"), "got {:?}", seg);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn main_checkout_is_not_marked() {
+        let root = scratch_dir("main_checkout");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main-branch\n").unwrap();
+        let seg = read_git_branch(&root, None);
+        assert!(seg.starts_with(" | 🌿 ") && seg.contains("main-branch"), "got {:?}", seg);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn worktree_pointer_to_nowhere_falls_back() {
+        let root = scratch_dir("wt_nowhere");
+        let wt = root.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), "gitdir: /nonexistent/statusline/wt\n").unwrap();
+        assert!(read_git_branch(&wt, Some("my-feature")).contains("my-feature"));
+        assert_eq!(read_git_branch(&wt, None), "");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     // --- Clock-dependent -----------------------------------------------------------

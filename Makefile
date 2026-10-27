@@ -132,11 +132,17 @@ test: $(TARGET)
 	  && echo "FAIL: gitdir pointer rendered a branch" || echo "PASS: gitdir pointer stays silent"; rm -rf $$tmp
 	@echo "Testing a real worktree (.git is a FILE) falls back to the worktree name..."
 	@tmp=$$(mktemp -d) && echo 'gitdir: /some/repo/.git/worktrees/feat' > $$tmp/.git && \
-	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp","git_worktree":"my-feature"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q '🌿 .*my-feature' \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp","git_worktree":"my-feature"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q '🔀 .*my-feature' \
 	  && echo "PASS: worktree name shown when HEAD is unreadable" || echo "FAIL: worktree fallback missing"; rm -rf $$tmp
+	@echo "Testing a real worktree follows its gitdir pointer to the branch..."
+	@tmp=$$(mktemp -d) && mkdir -p $$tmp/repo/.git/worktrees/feat $$tmp/wt && \
+	  echo 'ref: refs/heads/wt-branch' > $$tmp/repo/.git/worktrees/feat/HEAD && \
+	  echo "gitdir: $$tmp/repo/.git/worktrees/feat" > $$tmp/wt/.git && \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp","git_worktree":"my-feature"}}' | (cd $$tmp/wt && $(CURDIR)/$(TARGET)) | grep -q '🔀 .*wt-branch' \
+	  && echo "PASS: worktree shows its branch" || echo "FAIL: worktree branch not read through gitdir"; rm -rf $$tmp
 	@echo "Testing a worktree-shaped .git without the field stays silent..."
 	@tmp=$$(mktemp -d) && echo 'gitdir: /some/repo/.git/worktrees/feat' > $$tmp/.git && \
-	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q '🌿' \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q -e '🌿' -e '🔀' \
 	  && echo "FAIL: rendered a branch with nothing to render" || echo "PASS: no field, no segment"; rm -rf $$tmp
 	@echo "Testing a plain non-git folder is unaffected by the fallback..."
 	@tmp=$$(mktemp -d) && \

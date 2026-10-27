@@ -35,7 +35,7 @@ Rules, each of which has already cost someone a debugging session:
 - **Boundary tests must use literals, not the constants.** `token_color(CONTEXT_WARN_TOKENS)` holds whatever the constant says and pins nothing. Two of the three context steps were unpinned this way before it was caught.
 - **Clock-dependent assertions need a tolerance**, never equality — a second can tick between the test computing `now` and the function reading it. Applies to `burn_ratio`, `window_elapsed_secs`, `dry_in_suffix`.
 - **On Windows a rapid file restore can leave `cargo` fingerprinting a stale artifact.** "Still failing after revert" may be the incremental build; `rm -rf target/debug` settles it.
-- **Emoji needles in `build.ps1` need the right plane.** 🔥 💾 🧊 🎫 🌿 are astral and need a surrogate pair (`"$([char]0xD83D)$([char]0xDCBE)"`); ⏳ (U+23F3) and ⚡ (U+26A1) are BMP and take one `[char]`. Getting this wrong yields a needle that silently never matches.
+- **Emoji needles in `build.ps1` need the right plane.** 🔥 💾 🧊 🎫 🌿 🔀 are astral and need a surrogate pair (`"$([char]0xD83D)$([char]0xDCBE)"`); ⏳ (U+23F3) and ⚡ (U+26A1) are BMP and take one `[char]`. Getting this wrong yields a needle that silently never matches.
 - **Anchor assertions to the segment.** A bare `grep -q $'\033\['` matches line 1's coloured directory and can never fail.
 
 ## Thresholds
@@ -68,10 +68,10 @@ Rules, each of which has already cost someone a debugging session:
 
 ### Git branch
 
-Read directly from `.git/HEAD`, no subprocess. The forward slash is fine on Windows and `str::lines()` strips CRLF, so one code path serves both. Capped at `BRANCH_MAX_CHARS` with a trailing `…` — it is the only unbounded field on line 1 and renders *before* ⏳/⚡, so a long branch pushes exactly the segments that prompt a `/clear` off the edge. The **tail** is cut; the head carries the ticket id. Truncation counts `chars()`, not bytes — git permits UTF-8 in refs and a byte slice landing mid-codepoint panics.
+Read directly from `.git/HEAD`, or in a linked worktree from the `HEAD` its `gitdir:` pointer names, no subprocess. The forward slash is fine on Windows and `str::lines()` strips CRLF, so one code path serves both. Capped at `BRANCH_MAX_CHARS` with a trailing `…` — it is the only unbounded field on line 1 and renders *before* ⏳/⚡, so a long branch pushes exactly the segments that prompt a `/clear` off the edge. The **tail** is cut; the head carries the ticket id. Truncation counts `chars()`, not bytes — git permits UTF-8 in refs and a byte slice landing mid-codepoint panics.
 
 - **Detached HEAD** — the file holds a raw object id. This used to render empty, going quiet in the state most likely to leave you unsure where you are; a 40-char all-hex line now shows as `🌿 @abc1234`. The `@` marks it a commit rather than a branch named like hex. Slicing 7 bytes is safe only because the all-ASCII-hex check runs first.
-- **Worktrees** — `.git` is a *file* holding a `gitdir:` pointer, so the read fails with ENOTDIR (the `Err` arm, not a parse arm). `worktree_segment()` falls back to `workspace.git_worktree` rather than following the pointer, since the payload is parsed anyway. It names the *worktree*, not the branch in it. Submodules share the shape but get no such field, so they stay silent. **The "gitdir pointer" smoke case does not cover this** — it writes `gitdir:` into `HEAD` inside a real `.git` directory, exercising a parse arm; the real shape needs `.git` itself to be a file.
+- **Worktrees** — `.git` is a *file* holding a `gitdir:` pointer, so `.git/HEAD` fails with ENOTDIR. `read_head()` then reads `.git` as a file, follows its `gitdir:` line and reads `HEAD` there. A relative pointer (git 2.48+ writes one under `worktree.useRelativePaths`) resolves against the directory; an absolute one is used as is. A HEAD reached through the pointer renders with `WORKTREE_ICON` (🔀) in place of `BRANCH_ICON` (🌿), for a branch and a detached `@abc1234` alike, since edits there don't reach the main checkout. An icon rather than text, so the name keeps all of `BRANCH_MAX_CHARS`. `worktree_segment()` falls back to `workspace.git_worktree` only when no HEAD can be read or parsed, e.g. a pointer leading nowhere. It names the *worktree*, not the branch in it, and also renders with 🔀, since the field is present only in a worktree. Submodules share the `.git`-file shape, so their pointer is followed as well: they render their HEAD, usually a detached `@sha`, with 🔀. `read_git_branch()` takes the directory as a parameter, so unit tests use temp dirs instead of changing the process working directory. **The "gitdir pointer" smoke case does not cover the real shape:** it writes `gitdir:` into `HEAD` inside a real `.git` directory, exercising a parse arm. Two other smoke cases make `.git` itself a file: one pointing at a real `HEAD`, one pointing nowhere.
 
 ### Indicators
 
@@ -99,7 +99,7 @@ Read directly from `.git/HEAD`, no subprocess. The forward slash is fine on Wind
 | `model.display_name` | string | Model name in header |
 | `effort.level` | string | Reasoning effort after the model name (`low`/`medium`/`high`/`xhigh`/`max`, each its own colour) |
 | `workspace.current_dir` | string | Directory basename |
-| `workspace.git_worktree` | string | Branch fallback in a worktree, where `.git/HEAD` is unreadable |
+| `workspace.git_worktree` | string | Name shown in a worktree when no HEAD can be read through its `gitdir:` pointer |
 | `context_window.used_percentage` | number | Context %, coloured by `context_color()` |
 | `context_window.total_input_tokens` | int | Absolute size shown beside the % (`🎫 42% (84k)`); what the size ladder tests |
 | `context_window.current_usage.cache_read_input_tokens` | int | Numerator of the hit ratio |
