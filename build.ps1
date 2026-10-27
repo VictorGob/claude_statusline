@@ -369,6 +369,7 @@ function Invoke-Test {
     # --- Detached HEAD ----------------------------------------------------------
     $headJson = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}'
     $Herb = "$([char]0xD83C)$([char]0xDF3F)"
+    $Split = "$([char]0xD83D)$([char]0xDD00)"
 
     Write-Host "Testing a detached HEAD shows the short SHA..."
     Assert-True ((Invoke-StatuslineWithHead "1234567890abcdef1234567890abcdef12345678" $headJson).Contains("@1234567")) `
@@ -380,11 +381,29 @@ function Invoke-Test {
 
     Write-Host "Testing a real worktree (.git is a FILE) falls back to the worktree name..."
     $wtJson = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp","git_worktree":"my-feature"}}'
-    Assert-True ((Invoke-StatuslineInWorktree $wtJson).Contains("my-feature")) `
+    $wtFallback = Invoke-StatuslineInWorktree $wtJson
+    Assert-True ($wtFallback.Contains($Split) -and $wtFallback.Contains("my-feature")) `
         "worktree name shown when HEAD is unreadable" "worktree fallback missing"
 
+    Write-Host "Testing a real worktree follows its gitdir pointer to the branch..."
+    $wtRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("statusline_wtb_" + [guid]::NewGuid().ToString("N"))
+    $wtGitdir = Join-Path $wtRoot "repo\.git\worktrees\feat"
+    $wtDir = Join-Path $wtRoot "wt"
+    New-Item -ItemType Directory -Force $wtGitdir, $wtDir | Out-Null
+    try {
+        Set-Content (Join-Path $wtGitdir "HEAD") "ref: refs/heads/wt-branch" -NoNewline
+        Set-Content (Join-Path $wtDir ".git") "gitdir: $wtGitdir" -NoNewline
+        Push-Location $wtDir
+        try { $wtOut = ($wtJson | & $Target | Out-String) } finally { Pop-Location }
+    } finally {
+        Remove-Item $wtRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Assert-True ($wtOut.Contains($Split) -and $wtOut.Contains("wt-branch")) `
+        "worktree shows its branch" "worktree branch not read through gitdir"
+
     Write-Host "Testing a worktree-shaped .git without the field stays silent..."
-    Assert-True (-not (Invoke-StatuslineInWorktree $headJson).Contains($Herb)) `
+    $wtSilent = Invoke-StatuslineInWorktree $headJson
+    Assert-True (-not ($wtSilent.Contains($Herb) -or $wtSilent.Contains($Split))) `
         "no field, no segment" "rendered a branch with nothing to render"
 
     Write-Host "Testing a plain non-git folder is unaffected by the fallback..."

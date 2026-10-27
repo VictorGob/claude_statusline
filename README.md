@@ -26,7 +26,13 @@ On a detached HEAD there's no branch to show, so it falls back to the short comm
 🌿 @8d879d1
 ```
 
-In a git worktree `.git` is a file holding a pointer, so no branch is readable; the worktree's own name is shown instead, from the payload. Submodules have the same shape but no such field, so there the branch is omitted.
+In a linked git worktree `.git` is a file holding a `gitdir:` pointer. The statusline follows it to the worktree's own HEAD and shows that branch with 🔀 instead of 🌿, so you can tell it apart from the main checkout:
+
+```
+🔀 my-branch
+```
+
+The branch name keeps the full 40 characters. A detached HEAD in a worktree shows as `🔀 @8d879d1`. If the pointer leads nowhere, the worktree's own name from the payload is shown instead, also with 🔀. Submodules have the same `.git` shape, so they show their HEAD the same way, usually as a detached commit, and also with 🔀.
 
 ## Context size
 
