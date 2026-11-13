@@ -3,18 +3,18 @@
 A fast Rust statusline formatter for [Claude Code](https://claude.com/claude-code). Reads JSON from stdin, outputs a two-line ANSI-colored status display.
 
 ```
-Opus high | 📁 project | 🌿 main | ⏳ 2h15m ⚡16%
-🎫 42% (84k) | 💾 96% | ⏱️ 5h: 24%, resets in 2h35m | 📅 7d: 41%, resets in 3d11h
+Opus high | 📁 project | 🌿 main | ⏳ 2h15m
+🎫 42% (84k) | 💾 96% ❄️ cold in 8m | ⏱️ 5h: 24%, resets in 2h35m | 📅 7d: 41%, resets in 3d11h
 ```
 
-**Line 1:** model, reasoning effort (color-coded, when available), directory, git branch, session age and active share
-**Line 2:** context window % and size, cache hit ratio, 5-hour and 7-day rate limits with countdown — the "resets in" text is a [clickable link](https://claude.ai/settings/usage) in supported terminals
+**Line 1:** model, reasoning effort (color-coded, when available), directory, git branch, session age
+**Line 2:** context window % and size, cache hit ratio and cache state, 5-hour and 7-day rate limits with countdown — the "resets in" text is a [clickable link](https://claude.ai/settings/usage) in supported terminals
 
 Every segment is omitted rather than rendered empty when its data is absent.
 
 ## Git branch
 
-Read straight from `.git/HEAD` — no `git` subprocess. The name is cut to 40 characters with a trailing `…`; it's the one field with no natural bound, and it sits ahead of the session indicators, so a long ticket-style branch would otherwise push `⏳` and `⚡` off a narrow terminal. The tail goes, since the head carries the ticket id:
+Read straight from `.git/HEAD` — no `git` subprocess. The name is cut to 40 characters with a trailing `…`; it's the one field with no natural bound, and it sits ahead of the session indicators, so a long ticket-style branch would otherwise push `⏳` off a narrow terminal. The tail goes, since the head carries the ticket id:
 
 ```
 🌿 feature/PROJ-1482/limit-git-branch-leng…
@@ -63,21 +63,35 @@ The steps come from measured usage rather than taste: over a week of 5,384 reque
 
 ## Cache hit ratio
 
-`💾` is the share of the last turn's context re-read from the prompt cache rather than written into it. A cache write costs roughly 12x a cache read, so this tracks what the turn actually cost — at 96% you re-send a large context for almost nothing, at 20% you rebuild most of it at full price. It collapses when the one-hour cache lifetime expires, or when a model or settings change invalidates the prefix. Plain at ≥85%, yellow 60–84%, red below 60%.
+`💾` is the share of the last turn's context re-read from the prompt cache rather than written into it. A cache write costs roughly 12x a cache read, so this tracks what the turn actually cost: at 96% you re-send a large context for almost nothing, at 20% you rebuild most of it at full price. It collapses when the cache lifetime expires, or when a model or settings change invalidates the prefix. Plain at ≥85%, yellow 60–84%, red below 60%.
 
 It shows from the first turn, and goes quiet only after a `/compact`, where the payload reports no usage at all.
 
-**Rebuild marker.** A ratio is scale-free, so `💾 20%` looks identical whether 8k or 240k was rebuilt — and only one of those is worth acting on. When a turn writes more than 50k into the cache, `🧊` follows the ratio with the size written:
+Claude Code also reports the cache's own state in `prompt_cache`. Three markers come from it, and each one is omitted when its field is missing.
+
+**Cold countdown.** While the cache is warm and close to expiry, `❄️` shows the minutes left:
 
 ```
-💾 4% 🧊210k
+💾 96% ❄️ cold in 8m
 ```
 
-That turn re-sent 210k at write price. It appears on the first turns of a session (the prefix has to be built once — normal), after an idle gap longer than the cache lifetime, or repeatedly when something keeps invalidating the prefix. It also catches what the ratio misses — a healthy-looking 77% hit rate that still paid for 60k of writes:
+It appears once the cache expires in less than 10 minutes, or in less than half its lifetime, whichever is shorter. On a one-hour cache that is 10 minutes. On a five-minute cache it is 2 minutes 30 seconds, so the countdown doesn't show all the time. This is the moment to clear if you're about to step away.
+
+**Cold marker.** Once the cache has expired, `🥶` shows how much the next turn would re-write at write price, when that is more than 50k:
 
 ```
-💾 77% 🧊60k
+💾 96% 🥶210k
 ```
+
+Clearing now costs nothing extra: the next turn pays for the rebuild either way.
+
+**Miss cause.** While `💾` is red, the first reason Claude Code gives for the miss follows the ratio:
+
+```
+💾 40% (tools_changed)
+```
+
+Nothing shows when Claude Code reports no cause.
 
 ## Rate limits
 
@@ -101,13 +115,13 @@ The weekly window deliberately has no pace cue: a straight-line budget assumes u
 
 ## Session age
 
-`⏳` is wall-clock time since the session started or was last `/clear`ed — the window over which context has been accumulating. `⚡` is the fraction of it actually spent waiting on the model.
+`⏳` is wall-clock time since the session started or was last `/clear`ed — the window over which context has been accumulating.
 
 ```
-Opus high | 📁 project | 🌿 main | ⏳ 6h30m ⚡3%
+Opus high | 📁 project | 🌿 main | ⏳ 6h30m
 ```
 
-Six and a half hours holding a large context, of which twelve minutes was real work. Age turns yellow at 4h and red at 8h. `⚡` only warns when the session is both long *and* mostly idle, so it stays quiet on one you just opened, and is hidden entirely under an hour where the ratio means nothing.
+Age turns yellow at 4h and red at 8h.
 
 ## When something turns red
 
@@ -119,15 +133,15 @@ The colors are there to prompt a decision, not to tell you a number got big.
 
 Resist the urge to `/compact` here. Compaction re-reads the entire conversation it summarizes, so you'd pay a second large request on top of the miss you just took.
 
-**`🧊` with a large number** — mostly diagnostic, and the one indicator that is *not* a "do this now". The cost is sunk by the time you see it, and you've just bought a fresh cache, so clearing on the spot throws away what you paid for. The only live question is whether you still need the context. What it's really teaching is to clear *before* stepping away for an hour, not after coming back — by the time the `🧊` appears, that decision has already passed.
+**`❄️` countdown** — the cache expires soon. If you're about to step away, clear now. Coming back to a cold cache means the next turn rebuilds the whole prefix at write price.
+
+**`🥶` with a large number** — the cache has expired, and the next turn will re-write that much at write price. Clearing now costs nothing extra, so it's the free moment to `/rename` and `/clear` if you don't need the context.
 
 **`⏳` red** — eight hours of accumulated context. `/rename`, then `/clear`, writing a handoff brief first if the work isn't finished. Come back with `/resume`, and take the "resume from summary" offer if it appears.
 
-**`⚡`** never goes red. Yellow means the session is both long and mostly idle — the same verdict as `⏳`, arriving earlier.
+**`🎫` red with a cold cache** is the pair that isn't a judgment call: a large context that has lost its cache, where every further turn re-sends all of it at full price and there's nothing left worth preserving. Clear it.
 
-**`🎫` red with a large `🧊`** is the pair that isn't a judgment call: a large context that just lost its cache, where every further turn re-sends all of it at full price and there's nothing left worth preserving. Clear it.
-
-Put simply — `🎫` tells you what each further turn costs, `💾` and `🧊` tell you when clearing is free and what the last miss cost, and `⏳` tells you it's overdue.
+Put simply — `🎫` tells you what each further turn costs, `💾`, `❄️` and `🥶` tell you when clearing is free and why the last turn missed, and `⏳` tells you it's overdue.
 
 ## Benchmark
 

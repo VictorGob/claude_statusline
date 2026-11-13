@@ -1,38 +1,80 @@
 {
-    "hook_event_name": "Status",
-    "session_id": "abc123...",
-    "transcript_path": "/path/to/transcript.json",
-    "cwd": "/current/working/directory",
+    "session_id": "00000000-0000-0000-0000-000000000000",
+    "transcript_path": "/path/to/transcript.jsonl",
+    "cwd": "/path/to/my-project",
+    "scratchpad_dir": "/path/to/scratchpad",
+    "prompt_id": "00000000-0000-0000-0000-000000000000",
+    "effort": {
+        "level": "medium"
+    },
+    "session_name": "my-session",
     "model": {
-        "id": "claude-opus-4-1",
-        "display_name": "Opus"
+        "id": "claude-opus-5-5",
+        "display_name": "Opus 5.5"
     },
     "workspace": {
-        "current_dir": "/current/working/directory",
-        "project_dir": "/original/project/directory"
+        "current_dir": "/path/to/my-project",
+        "project_dir": "/path/to/my-project",
+        "added_dirs": [],
+        "repo": {
+            "host": "github.com",
+            "owner": "example",
+            "name": "my-project"
+        }
     },
-    "version": "1.0.80",
+    "version": "2.1.323",
     "output_style": {
-        "name": "default"
+        "name": "Concise"
     },
     "cost": {
-        "total_cost_usd": 4.87,
-        "total_duration_ms": 8100000,
-        "total_api_duration_ms": 1320000,
-        "total_lines_added": 156,
-        "total_lines_removed": 23
+        "total_cost_usd": 0.7393985999999999,
+        "total_duration_ms": 1133963,
+        "total_api_duration_ms": 64108,
+        "total_lines_added": 0,
+        "total_lines_removed": 0
     },
     "context_window": {
-        "total_input_tokens": 84000,
-        "total_output_tokens": 1200,
-        "context_window_size": 200000,
-        "used_percentage": 42,
-        "remaining_percentage": 58,
+        "total_input_tokens": 80660,
+        "total_output_tokens": 4,
+        "context_window_size": 1000000,
         "current_usage": {
-            "input_tokens": 850,
-            "output_tokens": 1200,
-            "cache_creation_input_tokens": 3150,
-            "cache_read_input_tokens": 80000
+            "input_tokens": 2,
+            "output_tokens": 4,
+            "cache_creation_input_tokens": 367,
+            "cache_read_input_tokens": 80291
+        },
+        "used_percentage": 8,
+        "remaining_percentage": 92
+    },
+    "exceeds_200k_tokens": false,
+    "prompt_cache": {
+        "warm": true,
+        "caching_observed": true,
+        "ttl": "1h",
+        "expires_at": 1794583055,
+        "requests": 16,
+        "misses": 0,
+        "expected_rebuilds": 0,
+        "hit_ratio": 0.9554076954077284,
+        "cache_write_tokens": 53965,
+        "miss_recache_tokens": 0,
+        "last_miss_at": null,
+        "last_miss_cause": null,
+        "miss_causes": {},
+        "recache_tokens_if_cold": 80293
+    },
+    "fast_mode": false,
+    "thinking": {
+        "enabled": true
+    },
+    "rate_limits": {
+        "five_hour": {
+            "used_percentage": 7,
+            "resets_at": 1794595800
+        },
+        "seven_day": {
+            "used_percentage": 18,
+            "resets_at": 1794848400
         }
     }
 }

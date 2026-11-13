@@ -250,13 +250,14 @@ function Invoke-Test {
         -PassMessage "7d has no pace cue" -FailMessage "7d should not flag pace"
 
     # Code points, not literals, matching the flame assertions above — they all rely
-    # on the UTF-8 capture forced at the top of this file. 💾, 🧊 and 🎫 are astral so
-    # they need surrogate pairs; ⏳ and ⚡ are BMP and take a single char.
+    # on the UTF-8 capture forced at the top of this file. 💾, 🥶 and 🎫 are astral so
+    # they need surrogate pairs; ⏳ is BMP and takes a single char.
     $Floppy = "$([char]0xD83D)$([char]0xDCBE)"
-    $Ice = "$([char]0xD83E)$([char]0xDDCA)"
+    $Freezing = "$([char]0xD83E)$([char]0xDD76)"
     $Ticket = "$([char]0xD83C)$([char]0xDFAB)"
     $Hourglass = "$([char]0x23F3)"
-    $Bolt = "$([char]0x26A1)"
+    $in5m = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + 300
+    $pcBase = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":10,"current_usage":{"cache_read_input_tokens":20000,"cache_creation_input_tokens":80000}},"prompt_cache":'
 
     Write-Host "Testing healthy cache ratio is uncolored (60% context, 95k read / 5k write)..."
     Assert-Output `
@@ -275,15 +276,25 @@ function Invoke-Test {
     Assert-Output -Json $coldStart -Needle "$Floppy 20%" -ShouldContain $true `
         -PassMessage "cold-start miss is visible" -FailMessage "cache cue hidden at low context"
 
-    Write-Host "Testing a large cache write is flagged as a rebuild (80k written)..."
-    Assert-Output -Json $coldStart -Needle "${Ice}80k" -ShouldContain $true `
-        -PassMessage "rebuild marker shows the size written" -FailMessage "rebuild marker missing"
+    Write-Host "Testing a cold cache with a large re-write is flagged (80k pending)..."
+    Assert-Output -Json ($pcBase + '{"warm":false,"ttl":"1h","recache_tokens_if_cold":80000}}') `
+        -Needle "${Freezing}80k" -ShouldContain $true `
+        -PassMessage "cold marker shows the size to re-write" -FailMessage "cold marker missing"
 
-    Write-Host "Testing a small cache write is not flagged (5k written)..."
-    Assert-Output `
-        -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":60,"current_usage":{"cache_read_input_tokens":95000,"cache_creation_input_tokens":5000}}}' `
-        -Needle $Ice -ShouldContain $false `
-        -PassMessage "no marker under 50k written" -FailMessage "a top-up is not a rebuild"
+    Write-Host "Testing a cold cache with a small re-write is not flagged (5k pending)..."
+    Assert-Output -Json ($pcBase + '{"warm":false,"ttl":"1h","recache_tokens_if_cold":5000}}') `
+        -Needle $Freezing -ShouldContain $false `
+        -PassMessage "no marker under 50k" -FailMessage "a top-up is not a rebuild"
+
+    Write-Host "Testing a warm cache near expiry shows the countdown (5m left, 1h TTL)..."
+    Assert-Output -Json ($pcBase + '{"warm":true,"ttl":"1h","expires_at":' + $in5m + '}}') `
+        -Needle "cold in" -ShouldContain $true `
+        -PassMessage "countdown shown" -FailMessage "countdown missing"
+
+    Write-Host "Testing an unexpected last_miss_cause shape still renders the line..."
+    Assert-Output -Json ($pcBase + '{"warm":true,"ttl":"1h","last_miss_cause":{"causes":{"tools_changed":1}}}}') `
+        -Needle "$Floppy 20%" -ShouldContain $true `
+        -PassMessage "odd cause shape ignored" -FailMessage "odd cause shape broke the line"
 
     Write-Host "Testing cache indicator hidden when current_usage is null (post-/compact)..."
     Assert-Output `
@@ -291,25 +302,15 @@ function Invoke-Test {
         -Needle $Floppy -ShouldContain $false `
         -PassMessage "no cache cue without usage" -FailMessage "null usage should render nothing"
 
-    Write-Host "Testing session age warns and shows activity (5h02m wall, 5m API)..."
-    $longSession = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":18120000,"total_api_duration_ms":300000}}'
+    Write-Host "Testing session age warns past 4h (5h02m wall)..."
+    $longSession = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":18120000}}'
     Assert-Output -Json $longSession -Needle "$ESC[33m5h02m" -ShouldContain $true `
         -PassMessage "yellow age past 4h" -FailMessage "missing yellow age"
-    Assert-Output -Json $longSession -Needle "${Bolt}2%" -ShouldContain $true `
-        -PassMessage "activity shown on long session" -FailMessage "activity missing"
 
-    Write-Host "Testing a short session shows age but no activity (10m wall)..."
-    $shortSession = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":600000,"total_api_duration_ms":120000}}'
+    Write-Host "Testing a short session shows age plain (10m wall)..."
+    $shortSession = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":600000}}'
     Assert-Output -Json $shortSession -Needle "$Hourglass 10m" -ShouldContain $true `
         -PassMessage "10m age shown plain" -FailMessage "age missing"
-    Assert-Output -Json $shortSession -Needle $Bolt -ShouldContain $false `
-        -PassMessage "no activity cue under 1h" -FailMessage "activity meaningless under 1h"
-
-    Write-Host "Testing activity clamps at 100% (parallel subagents sum past wall clock)..."
-    Assert-Output `
-        -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":7200000,"total_api_duration_ms":18000000}}' `
-        -Needle "${Bolt}100%" -ShouldContain $true `
-        -PassMessage "activity clamped to 100%" -FailMessage "activity exceeded 100%"
 
     # --- Context size -----------------------------------------------------------
     # The size ladder is absolute. Every case below pairs a size with a percentage the

@@ -29,11 +29,14 @@ const BURN_HIGH_RATIO: f64 = 1.75;
 /// These run backwards from every other threshold here: high is good.
 const CACHE_WARN_RATIO: f64 = 0.85;
 const CACHE_HIGH_RATIO: f64 = 0.60;
-/// A turn that writes more than this into the cache rebuilt the prefix rather than
-/// topping it up, and a write token costs roughly 12x a read one. The ratio alone
-/// cannot say this: 20% off a small turn and 20% off a 300k rebuild render
-/// identically, and only one of them is worth clearing the session over.
+/// A cold cache that would re-write more than this on the next turn is a rebuild rather
+/// than a top-up, and a write token costs roughly 12x a read one. Below it, clearing and
+/// continuing cost about the same, so the 🥶 marker stays quiet.
 const CACHE_REBUILD_TOKENS: u64 = 50_000;
+/// The ❄️ countdown appears once the cache expires in less than this, or in less than
+/// half the TTL, whichever is shorter. A fixed 10 minutes would show it permanently on
+/// a 5-minute TTL.
+const COLD_WARN_MAX_SECS: i64 = 600;
 
 /// The context size ladder, in tokens of billed input per turn. Measured, not picked:
 /// over 5,384 requests / 1,043M billed input tokens in one week, the share of turns
@@ -81,12 +84,9 @@ const CONTEXT_HIGH_PCT: f64 = 90.0;
 const AGE_MIN_SECS: u64 = 60;
 const AGE_WARN_SECS: u64 = 4 * 3600;
 const AGE_HIGH_SECS: u64 = 8 * 3600;
-/// Below an hour the API/wall ratio swings too wildly to mean anything.
-const ACTIVITY_MIN_AGE_SECS: u64 = 3600;
-const ACTIVITY_WARN_PCT: f64 = 5.0;
 
 /// The branch is the only unbounded field on line 1, and it renders before the age
-/// and activity indicators — so an overlong branch pushes exactly the segments that
+/// indicator — so an overlong branch pushes exactly the segment that
 /// prompt a /clear off the right edge. Cut the tail rather than the middle: the head
 /// is where the ticket id lives, which is what identifies the branch at a glance.
 const BRANCH_MAX_CHARS: usize = 40;
@@ -122,6 +122,23 @@ struct Root {
     rate_limits: Option<RateLimits>,
     effort: Option<Effort>,
     cost: Option<Cost>,
+    prompt_cache: Option<PromptCache>,
+}
+
+/// Cache state as Claude Code tracks it. Only the per-turn fields are read: the session
+/// totals (`hit_ratio`, `misses`, `requests`, ...) would average away the turn that 💾
+/// exists to show. The typed fields are the ones seen in a real input.
+#[derive(Deserialize)]
+struct PromptCache {
+    warm: Option<bool>,
+    expires_at: Option<i64>,
+    /// "1h" in a real input. The 5-minute form is unverified, assumed to be "5m".
+    ttl: Option<String>,
+    recache_tokens_if_cold: Option<u64>,
+    /// Unverified shape: null in every real input so far. Kept untyped so that a shape
+    /// other than the documented `{"causes": [..]}` drops the cause instead of failing
+    /// the whole parse, which would cost the entire status line.
+    last_miss_cause: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -159,12 +176,11 @@ struct CurrentUsage {
     cache_read_input_tokens: Option<u64>,
 }
 
-/// Wall-clock and API time for the session. /clear resets both, so the age is
-/// really "time since the last /clear" — which is when context started growing.
+/// Wall-clock time for the session. /clear resets it, so the age is really "time
+/// since the last /clear" — which is when context started growing.
 #[derive(Deserialize)]
 struct Cost {
     total_duration_ms: Option<u64>,
-    total_api_duration_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -421,7 +437,14 @@ fn cache_hit_ratio(usage: &CurrentUsage) -> Option<f64> {
 /// Shown from the first turn: this used to sit behind a context floor on the grounds
 /// that a cold start is all writes by construction and cheap to redo, but a cold
 /// start at full context size is precisely the expensive event worth catching.
-fn cache_suffix(usage: Option<&CurrentUsage>) -> String {
+///
+/// `prompt_cache` adds the miss cause while red, then either the ❄️ countdown or the
+/// 🥶 marker. Each piece drops out alone when its field is missing.
+fn cache_suffix(
+    usage: Option<&CurrentUsage>,
+    pc: Option<&PromptCache>,
+    now: Option<i64>,
+) -> String {
     let usage = match usage {
         Some(u) => u,
         None => return String::new(),
@@ -431,23 +454,61 @@ fn cache_suffix(usage: Option<&CurrentUsage>) -> String {
         None => return String::new(),
     };
     let (color, reset) = cache_color(ratio);
-    format!(
-        "{}💾 {:.0}%{}{}",
-        color,
-        ratio * 100.0,
-        reset,
-        rebuild_marker(usage)
-    )
+    let mut out = format!("{}💾 {:.0}%{}", color, ratio * 100.0, reset);
+    if let Some(pc) = pc {
+        if color == COLOR_RED {
+            if let Some(cause) = pc.last_miss_cause.as_ref().and_then(miss_cause) {
+                out.push_str(&format!(" ({})", cause));
+            }
+        }
+        out.push_str(&cold_suffix(pc, now));
+    }
+    out
 }
 
-/// " 🧊200k" when this turn wrote more than CACHE_REBUILD_TOKENS into the cache:
-/// the prefix was rebuilt from cold, and the size is the cost. Rendered beside the
-/// ratio rather than folded into it, since the two answer different questions — how
-/// much of the turn missed, and how much that miss actually re-sent.
-fn rebuild_marker(usage: &CurrentUsage) -> String {
-    match usage.cache_creation_input_tokens {
-        Some(n) if n > CACHE_REBUILD_TOKENS => {
-            format!(" {}🧊{}{}", COLOR_RED, format_tokens(n), COLOR_RESET)
+/// The first cause in `last_miss_cause.causes`. Read by hand from an untyped value
+/// because the shape is unverified: anything other than an array holding a string
+/// yields None, never an error.
+fn miss_cause(v: &serde_json::Value) -> Option<&str> {
+    v.get("causes")?.as_array()?.iter().find_map(|c| c.as_str())
+}
+
+/// "1h" -> 3600, "5m" -> 300. None for anything else, which skips the countdown only.
+/// strip_suffix rather than a byte split, which panics on a multi-byte last char.
+fn parse_ttl_secs(ttl: &str) -> Option<i64> {
+    let (num, unit_secs) = if let Some(n) = ttl.strip_suffix('m') {
+        (n, 60)
+    } else {
+        (ttl.strip_suffix('h')?, 3600)
+    };
+    num.parse::<i64>().ok()?.checked_mul(unit_secs)
+}
+
+/// " ❄️ cold in 8m" while warm and close to expiry, " 🥶210k" once cold with a rebuild
+/// pending. Expiry comes from `expires_at`, not `warm`: whether Claude Code recomputes
+/// `warm` on a `refreshInterval` tick is unverified, so a past `expires_at` counts as
+/// cold even while `warm` still says true.
+fn cold_suffix(pc: &PromptCache, now: Option<i64>) -> String {
+    let remaining = match (pc.expires_at, now) {
+        (Some(at), Some(now)) => Some(at.saturating_sub(now)),
+        _ => None,
+    };
+    let cold = pc.warm == Some(false) || remaining.is_some_and(|r| r <= 0);
+    if cold {
+        return match pc.recache_tokens_if_cold {
+            Some(n) if n > CACHE_REBUILD_TOKENS => {
+                format!(" {}🥶{}{}", COLOR_RED, format_tokens(n), COLOR_RESET)
+            }
+            _ => String::new(),
+        };
+    }
+    let threshold = match pc.ttl.as_deref().and_then(parse_ttl_secs) {
+        Some(ttl) => COLD_WARN_MAX_SECS.min(ttl / 2),
+        None => return String::new(),
+    };
+    match remaining {
+        Some(r) if pc.warm == Some(true) && r < threshold => {
+            format!(" ❄️ cold in {}m", r / 60)
         }
         _ => String::new(),
     }
@@ -491,9 +552,7 @@ fn format_age(secs: u64) -> String {
     }
 }
 
-/// " | ⏳ 4h02m ⚡8%" — how long this context has been accumulating, and how much
-/// of that was actually spent waiting on the model. A long session that is mostly
-/// idle is a large context held open for nothing, and re-sent on every turn.
+/// " | ⏳ 4h02m" — how long this context has been accumulating.
 fn session_suffix(cost: &Cost) -> String {
     let secs = match cost.total_duration_ms {
         Some(ms) if ms / 1000 >= AGE_MIN_SECS => ms / 1000,
@@ -507,26 +566,7 @@ fn session_suffix(cost: &Cost) -> String {
         ("", "")
     };
 
-    let mut out = format!(" | ⏳ {}{}{}", color, format_age(secs), reset);
-
-    // Both conditions have to hold: a low active share only means something once
-    // the session has been open long enough for the idling to have cost anything.
-    if secs >= ACTIVITY_MIN_AGE_SECS {
-        if let Some(api_ms) = cost.total_api_duration_ms {
-            // Clamped: total_api_duration_ms sums per-request durations, so parallel
-            // subagents push it past wall clock. This answers "how much of the session
-            // was real work" — a bounded share — so 100% is the honest ceiling; degree
-            // of parallelism is a different question this cue isn't for.
-            let pct = (api_ms as f64 / (secs * 1000) as f64 * 100.0).min(100.0);
-            let (c, r) = if secs >= AGE_WARN_SECS && pct < ACTIVITY_WARN_PCT {
-                (COLOR_YELLOW, COLOR_RESET)
-            } else {
-                ("", "")
-            };
-            out.push_str(&format!(" {}⚡{:.0}%{}", c, pct, r));
-        }
-    }
-    out
+    format!(" | ⏳ {}{}{}", color, format_age(secs), reset)
 }
 
 /// Colors the context segment as the louder of two ladders, because they answer
@@ -700,10 +740,10 @@ fn main() {
         None => String::new(),
     };
 
-    // Session age and active share, when the session is old enough to have any
+    // Session age, when the session is old enough to have any
     let age_suffix = root.cost.as_ref().map(session_suffix).unwrap_or_default();
 
-    // Build line 1: [Model] effort | 📁 dir | 🌿 branch | ⏳ age ⚡active
+    // Build line 1: [Model] effort | 📁 dir | 🌿 branch | ⏳ age
     let line1 = format!(
         "{}{}{}{} | 📁 {}{}{}{}{}",
         STYLE_BOLD,
@@ -735,7 +775,7 @@ fn main() {
         has_content = true;
     }
 
-    let cache = cache_suffix(current_usage);
+    let cache = cache_suffix(current_usage, root.prompt_cache.as_ref(), now_epoch());
     if !cache.is_empty() {
         if has_content {
             line2.push_str(" | ");
@@ -862,29 +902,11 @@ mod tests {
     #[test]
     fn cache_suffix_shows_from_the_first_turn() {
         let cold = usage(Some(0), Some(120_000));
-        let out = cache_suffix(Some(&cold));
+        let out = cache_suffix(Some(&cold), None, None);
         assert!(out.contains("💾 0%"), "got {}", out);
         assert!(out.starts_with(COLOR_RED), "a total miss is red: {}", out);
-        assert_eq!(cache_suffix(None), "", "post-/compact null usage");
-        assert_eq!(cache_suffix(Some(&usage(Some(0), Some(0)))), "", "no tokens yet");
-    }
-
-    /// Both sides of the rebuild threshold. The ratio cannot carry this on its own:
-    /// 20% off a 5k top-up and 20% off a 300k rebuild render identically.
-    #[test]
-    fn rebuild_marker_boundaries() {
-        assert_eq!(
-            rebuild_marker(&usage(Some(10), Some(CACHE_REBUILD_TOKENS))),
-            "",
-            "exactly at the threshold is still a top-up"
-        );
-        let over = rebuild_marker(&usage(Some(10), Some(CACHE_REBUILD_TOKENS + 1)));
-        assert!(over.contains("🧊") && over.contains("50k"), "got {}", over);
-        assert_eq!(rebuild_marker(&usage(Some(10), None)), "", "no write field");
-
-        // And it rides along on the suffix, not just in isolation.
-        assert!(cache_suffix(Some(&usage(Some(20_000), Some(80_000)))).contains("🧊80k"));
-        assert!(!cache_suffix(Some(&usage(Some(95_000), Some(5_000)))).contains("🧊"));
+        assert_eq!(cache_suffix(None, None, None), "", "post-/compact null usage");
+        assert_eq!(cache_suffix(Some(&usage(Some(0), Some(0))), None, None), "", "no tokens yet");
     }
 
     /// Both sides of all three size steps, in isolation from the percentage ladder.
@@ -1010,43 +1032,18 @@ mod tests {
         assert_eq!(format_age(90000), "1d1h");
     }
 
-    fn cost(total_ms: Option<u64>, api_ms: Option<u64>) -> Cost {
+    fn cost(total_ms: Option<u64>) -> Cost {
         Cost {
             total_duration_ms: total_ms,
-            total_api_duration_ms: api_ms,
         }
     }
 
     #[test]
-    fn session_suffix_age_and_activity_gates() {
-        assert_eq!(session_suffix(&cost(Some(59_000), None)), "", "under a minute");
-        assert!(session_suffix(&cost(Some(60_000), None)).contains("⏳"));
-
-        // The activity share is meaningless on a short session, so it stays hidden.
-        let short = session_suffix(&cost(Some(600_000), Some(120_000)));
-        assert!(short.contains("⏳ 10m") && !short.contains("⚡"));
-        assert!(session_suffix(&cost(Some(3_600_000), Some(120_000))).contains("⚡"));
-    }
-
-    /// Needs *both* conditions: a low active share only means something once the session
-    /// has been open long enough for the idling to have cost anything.
-    #[test]
-    fn session_suffix_activity_warns_only_when_old_and_idle() {
-        let old_idle = session_suffix(&cost(Some(18_120_000), Some(300_000)));
-        assert!(old_idle.contains("⚡2%") && old_idle.contains(COLOR_YELLOW));
-
-        // Old but busy: the age still colours, so check the activity segment itself is
-        // plain — a bare space before the bolt means no escape was emitted.
-        let old_busy = session_suffix(&cost(Some(18_120_000), Some(18_000_000)));
-        assert!(old_busy.contains(" ⚡99%"), "busy session, uncoloured: {}", old_busy);
-
-        // Parallel subagents sum past wall clock; 100% is the honest ceiling.
-        let parallel = session_suffix(&cost(Some(7_200_000), Some(18_000_000)));
-        assert!(parallel.contains("⚡100%"), "clamped, not 250%: {}", parallel);
-
-        // Young and idle: under AGE_WARN_SECS the share is shown but never coloured.
-        let young_idle = session_suffix(&cost(Some(3_600_000), Some(1_000)));
-        assert!(young_idle.contains("⚡0%") && !young_idle.contains(COLOR_YELLOW));
+    fn session_suffix_age_gate() {
+        assert_eq!(session_suffix(&cost(Some(59_000))), "", "under a minute");
+        assert!(session_suffix(&cost(Some(600_000))).contains("⏳ 10m"));
+        let old = session_suffix(&cost(Some(18_120_000)));
+        assert!(old.contains(COLOR_YELLOW) && old.contains("5h02m"), "got {}", old);
     }
 
     #[test]
@@ -1161,6 +1158,132 @@ mod tests {
         assert!(read_git_branch(&wt, Some("my-feature")).contains("my-feature"));
         assert_eq!(read_git_branch(&wt, None), "");
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // --- prompt_cache ---------------------------------------------------------------
+    // `now` is passed in, so these are deterministic. NOW is an arbitrary epoch.
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn pc(warm: Option<bool>, expires_in: Option<i64>, ttl: Option<&str>, recache: Option<u64>) -> PromptCache {
+        PromptCache {
+            warm,
+            expires_at: expires_in.map(|s| NOW + s),
+            ttl: ttl.map(str::to_string),
+            recache_tokens_if_cold: recache,
+            last_miss_cause: None,
+        }
+    }
+
+    #[test]
+    fn warm_near_expiry_shows_the_countdown() {
+        let out = cold_suffix(&pc(Some(true), Some(8 * 60 + 30), Some("1h"), Some(80_000)), Some(NOW));
+        assert_eq!(out, " ❄️ cold in 8m", "whole minutes, rounded down");
+    }
+
+    #[test]
+    fn warm_far_from_expiry_stays_quiet() {
+        assert_eq!(cold_suffix(&pc(Some(true), Some(30 * 60), Some("1h"), Some(80_000)), Some(NOW)), "");
+    }
+
+    /// Literals on both sides of the 10-minute cap, which is the binding limit on a 1h TTL.
+    #[test]
+    fn countdown_threshold_boundaries() {
+        let at = |secs| cold_suffix(&pc(Some(true), Some(secs), Some("1h"), None), Some(NOW));
+        assert_eq!(at(600), "", "exactly 10m is not below the threshold");
+        assert_eq!(at(599), " ❄️ cold in 9m");
+    }
+
+    /// The 5m form of `ttl` is unverified: only "1h" has been seen in a real input.
+    /// Half of 5m is 2m30s, so 4m out shows on a 1h TTL and stays quiet on 5m.
+    #[test]
+    fn ttl_5m_unverified_against_1h() {
+        let four_min = |ttl| cold_suffix(&pc(Some(true), Some(240), Some(ttl), None), Some(NOW));
+        assert_eq!(four_min("1h"), " ❄️ cold in 4m");
+        assert_eq!(four_min("5m"), "", "a 10m threshold would always show on 5m");
+        let at = |secs| cold_suffix(&pc(Some(true), Some(secs), Some("5m"), None), Some(NOW));
+        assert_eq!(at(150), "", "exactly half the TTL");
+        assert_eq!(at(149), " ❄️ cold in 2m");
+    }
+
+    #[test]
+    fn unparseable_ttl_skips_only_the_countdown() {
+        for ttl in [None, Some(""), Some("1d"), Some("h"), Some("3600"), Some("5ñ"), Some("99999999999999999h")] {
+            assert_eq!(cold_suffix(&pc(Some(true), Some(60), ttl, None), Some(NOW)), "", "ttl {:?}", ttl);
+        }
+        assert_eq!(parse_ttl_secs("1h"), Some(3600));
+        assert_eq!(parse_ttl_secs("5m"), Some(300));
+    }
+
+    #[test]
+    fn cold_above_rebuild_size_shows_the_marker() {
+        let out = cold_suffix(&pc(Some(false), None, Some("1h"), Some(210_000)), Some(NOW));
+        assert!(out.contains("🥶210k") && out.contains(COLOR_RED), "got {:?}", out);
+        // A past expires_at is cold even if `warm` has not caught up.
+        let stale = cold_suffix(&pc(Some(true), Some(-5), Some("1h"), Some(210_000)), Some(NOW));
+        assert!(stale.contains("🥶210k"), "got {:?}", stale);
+    }
+
+    /// Literals: strictly above 50k, so 50,000 itself is still a top-up.
+    #[test]
+    fn cold_below_rebuild_size_stays_quiet() {
+        let cold = |n| cold_suffix(&pc(Some(false), None, Some("1h"), Some(n)), Some(NOW));
+        assert_eq!(cold(50_000), "");
+        assert!(cold(50_001).contains("🥶50k"));
+        assert_eq!(cold_suffix(&pc(Some(false), None, None, None), Some(NOW)), "", "no size, no marker");
+    }
+
+    #[test]
+    fn prompt_cache_absent_leaves_the_ratio_alone() {
+        let u = usage(Some(95_000), Some(5_000));
+        assert_eq!(cache_suffix(Some(&u), None, Some(NOW)), "💾 95%");
+    }
+
+    fn with_cause(cause: serde_json::Value) -> PromptCache {
+        let mut p = pc(Some(true), Some(3000), Some("1h"), Some(80_000));
+        p.last_miss_cause = Some(cause);
+        p
+    }
+
+    /// The `causes` shape is unverified: no real input has had a miss yet. This is the
+    /// documented shape.
+    #[test]
+    fn miss_cause_shows_only_while_red() {
+        let cause = with_cause(serde_json::json!({"causes": ["tools_changed", "model_changed"]}));
+        let red = cache_suffix(Some(&usage(Some(40), Some(60))), Some(&cause), Some(NOW));
+        assert!(red.contains("💾 40%") && red.ends_with(" (tools_changed)"), "got {:?}", red);
+        let yellow = cache_suffix(Some(&usage(Some(70), Some(30))), Some(&cause), Some(NOW));
+        assert!(!yellow.contains("tools_changed"), "got {:?}", yellow);
+    }
+
+    #[test]
+    fn last_miss_cause_null_shows_nothing() {
+        let root: Root = serde_json::from_str(r#"{"prompt_cache":{"warm":true,"last_miss_cause":null}}"#).unwrap();
+        let p = root.prompt_cache.unwrap();
+        assert!(p.last_miss_cause.is_none());
+        assert_eq!(cache_suffix(Some(&usage(Some(40), Some(60))), Some(&p), Some(NOW)), format!("{}💾 40%{}", COLOR_RED, COLOR_RESET));
+    }
+
+    /// Any shape other than an array holding a string drops the cause, and none of them
+    /// may fail the parse in main(): that would cost the whole line.
+    #[test]
+    fn unexpected_miss_cause_shapes_still_render() {
+        for shape in [
+            r#"{"other":1}"#,
+            r#""tools_changed""#,
+            r#"{"causes":{"tools_changed":3}}"#,
+            r#"{"causes":[1, 2]}"#,
+            r#"[]"#,
+        ] {
+            let json = format!(
+                r#"{{"model":{{"display_name":"Opus"}},"context_window":{{"used_percentage":8}},"prompt_cache":{{"warm":true,"ttl":"1h","last_miss_cause":{}}}}}"#,
+                shape
+            );
+            let root: Root = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{}: {}", shape, e));
+            let p = root.prompt_cache.unwrap();
+            let out = cache_suffix(Some(&usage(Some(40), Some(60))), Some(&p), Some(NOW));
+            assert_eq!(out, format!("{}💾 40%{}", COLOR_RED, COLOR_RESET), "shape {}", shape);
+        }
     }
 
     // --- Clock-dependent -----------------------------------------------------------
