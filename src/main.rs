@@ -87,7 +87,7 @@ const AGE_HIGH_SECS: u64 = 8 * 3600;
 
 /// The branch is the only unbounded field on line 1, and it renders before the age
 /// indicator — so an overlong branch pushes exactly the segment that
-/// prompt a /clear off the right edge. Cut the tail rather than the middle: the head
+/// prompts a /clear off the right edge. Cut the tail rather than the middle: the head
 /// is where the ticket id lives, which is what identifies the branch at a glance.
 const BRANCH_MAX_CHARS: usize = 40;
 /// Replaces 🌿 for a branch checked out in a linked worktree, where edits don't reach
@@ -439,7 +439,8 @@ fn cache_hit_ratio(usage: &CurrentUsage) -> Option<f64> {
 /// start at full context size is precisely the expensive event worth catching.
 ///
 /// `prompt_cache` adds the miss cause while red, then either the ❄️ countdown or the
-/// 🥶 marker. Each piece drops out alone when its field is missing.
+/// 🥶 marker. Each piece drops out alone when its field is missing, but all of them
+/// need the ratio: with no `current_usage` the whole segment is omitted.
 fn cache_suffix(
     usage: Option<&CurrentUsage>,
     pc: Option<&PromptCache>,
@@ -508,7 +509,8 @@ fn cold_suffix(pc: &PromptCache, now: Option<i64>) -> String {
     };
     match remaining {
         Some(r) if pc.warm == Some(true) && r < threshold => {
-            format!(" ❄️ cold in {}m", r / 60)
+            // Rounded up, so the last minute reads 1m rather than 0m.
+            format!(" ❄️ cold in {}m", (r + 59) / 60)
         }
         _ => String::new(),
     }
@@ -1178,7 +1180,23 @@ mod tests {
     #[test]
     fn warm_near_expiry_shows_the_countdown() {
         let out = cold_suffix(&pc(Some(true), Some(8 * 60 + 30), Some("1h"), Some(80_000)), Some(NOW));
-        assert_eq!(out, " ❄️ cold in 8m", "whole minutes, rounded down");
+        assert_eq!(out, " ❄️ cold in 9m", "whole minutes, rounded up");
+    }
+
+    /// The last minute rounds up to 1m, never 0m.
+    #[test]
+    fn last_minute_never_reads_zero() {
+        let at = |secs| cold_suffix(&pc(Some(true), Some(secs), Some("1h"), None), Some(NOW));
+        assert_eq!(at(1), " ❄️ cold in 1m");
+        assert_eq!(at(59), " ❄️ cold in 1m");
+        assert_eq!(at(60), " ❄️ cold in 1m");
+        assert_eq!(at(61), " ❄️ cold in 2m");
+    }
+
+    /// The countdown needs `warm` to say true; an absent `warm` stays quiet near expiry.
+    #[test]
+    fn warm_absent_shows_no_countdown() {
+        assert_eq!(cold_suffix(&pc(None, Some(120), Some("1h"), Some(80_000)), Some(NOW)), "");
     }
 
     #[test]
@@ -1191,7 +1209,7 @@ mod tests {
     fn countdown_threshold_boundaries() {
         let at = |secs| cold_suffix(&pc(Some(true), Some(secs), Some("1h"), None), Some(NOW));
         assert_eq!(at(600), "", "exactly 10m is not below the threshold");
-        assert_eq!(at(599), " ❄️ cold in 9m");
+        assert_eq!(at(599), " ❄️ cold in 10m");
     }
 
     /// The 5m form of `ttl` is unverified: only "1h" has been seen in a real input.
@@ -1203,7 +1221,7 @@ mod tests {
         assert_eq!(four_min("5m"), "", "a 10m threshold would always show on 5m");
         let at = |secs| cold_suffix(&pc(Some(true), Some(secs), Some("5m"), None), Some(NOW));
         assert_eq!(at(150), "", "exactly half the TTL");
-        assert_eq!(at(149), " ❄️ cold in 2m");
+        assert_eq!(at(149), " ❄️ cold in 3m");
     }
 
     #[test]

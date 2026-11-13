@@ -296,6 +296,11 @@ function Invoke-Test {
         -Needle "$Floppy 20%" -ShouldContain $true `
         -PassMessage "odd cause shape ignored" -FailMessage "odd cause shape broke the line"
 
+    Write-Host "Testing a red cache shows the miss cause (causes shape unverified)..."
+    Assert-Output -Json ($pcBase + '{"warm":true,"ttl":"1h","last_miss_cause":{"causes":["tools_changed"]}}}') `
+        -Needle " (tools_changed)" -ShouldContain $true `
+        -PassMessage "miss cause shown while red" -FailMessage "miss cause missing"
+
     Write-Host "Testing cache indicator hidden when current_usage is null (post-/compact)..."
     Assert-Output `
         -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":60,"current_usage":null}}' `
