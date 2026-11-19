@@ -6,6 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const GIT_HEAD_PATH: &str = ".git/HEAD";
 const GIT_REF_PREFIX: &str = "ref: refs/heads/";
 const GITDIR_PREFIX: &str = "gitdir: ";
+/// What git writes to HEAD in a reftable repo, so tools parsing the file fail visibly.
+/// The real HEAD lives in the reftable stack. `.invalid` is not a legal branch name, so
+/// a classic repo can never hold this line.
+const REFTABLE_HEAD: &str = "ref: refs/heads/.invalid";
 
 const FIVE_HOUR_WINDOW_SECS: i64 = 18000;
 /// Ignore the first 2% of the window (6 min). This is only a residual guard against a
@@ -280,14 +284,55 @@ fn read_head(dir: &Path) -> Option<(String, bool)> {
     Some((head, true))
 }
 
+/// Asks git for HEAD, in the same shape the HEAD file has: `ref: refs/heads/<branch>`, or
+/// the full object id when detached. The full id, not `rev-parse --short`, because git
+/// lengthens a short id when it is ambiguous, and the detached display cuts it at 7.
+/// `-C dir` is the checkout itself, so in a linked worktree git reads that worktree's HEAD.
+fn git_head(dir: &Path) -> Option<String> {
+    let run = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8(out.stdout).ok()?.trim_end().to_string())
+    };
+    // Exits non-zero on a detached HEAD.
+    if let Some(r) = run(&["symbolic-ref", "-q", "HEAD"]) {
+        return Some(format!("ref: {}", r));
+    }
+    run(&["rev-parse", "--verify", "-q", "HEAD"])
+}
+
 fn read_git_branch(dir: &Path, worktree: Option<&str>) -> String {
+    read_git_branch_with(dir, worktree, git_head)
+}
+
+/// `git` is called only when HEAD is the reftable placeholder, so a classic repo or
+/// worktree spawns nothing. Tests pass a stand-in to prove that.
+fn read_git_branch_with(dir: &Path, worktree: Option<&str>, git: fn(&Path) -> Option<String>) -> String {
     let (content, in_worktree) = match read_head(dir) {
         Some(c) => c,
         // Not a git dir, or a worktree pointer leading nowhere. Outside a worktree the
         // field is absent, so a plain folder returns the same empty string as before.
         None => return worktree_segment(worktree),
     };
-    let line = content.lines().next().unwrap_or("");
+    let resolved;
+    let mut line = content.lines().next().unwrap_or("");
+    if line == REFTABLE_HEAD {
+        // No git, or git failed: never render the placeholder as a branch.
+        resolved = match git(dir) {
+            Some(l) => l,
+            None => return worktree_segment(worktree),
+        };
+        line = &resolved;
+    }
 
     match line.strip_prefix(GIT_REF_PREFIX) {
         Some(branch) => branch_segment(branch, in_worktree),
@@ -1160,6 +1205,105 @@ mod tests {
         std::fs::write(wt.join(".git"), "gitdir: /nonexistent/statusline/wt\n").unwrap();
         assert!(read_git_branch(&wt, Some("my-feature")).contains("my-feature"));
         assert_eq!(read_git_branch(&wt, None), "");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn no_git(_: &Path) -> Option<String> {
+        panic!("git subprocess ran on the fast path")
+    }
+
+    #[test]
+    fn classic_head_spawns_no_git() {
+        let root = scratch_dir("classic_no_git");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main-branch\n").unwrap();
+        let seg = read_git_branch_with(&root, None, no_git);
+        assert_eq!(seg, read_git_branch(&root, None));
+        assert!(seg.starts_with(" | 🌿 ") && seg.contains("main-branch"), "got {:?}", seg);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn classic_worktree_spawns_no_git() {
+        let root = scratch_dir("classic_wt_no_git");
+        let wt = linked_worktree(&root, "../repo/.git/worktrees/wt", "ref: refs/heads/rel-branch\n");
+        let seg = read_git_branch_with(&wt, Some("wt"), no_git);
+        assert!(seg.starts_with(" | 🔀 ") && seg.contains("rel-branch"), "got {:?}", seg);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn reftable_placeholder_without_git_falls_back() {
+        let root = scratch_dir("reftable_no_git");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/.invalid\n").unwrap();
+        let failed = |_: &Path| -> Option<String> { None };
+        assert_eq!(read_git_branch_with(&root, None, failed), "");
+        let wt = read_git_branch_with(&root, Some("my-wt"), failed);
+        assert!(wt.contains("my-wt") && !wt.contains(".invalid"), "got {:?}", wt);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Runs git in `dir` with a fixed identity and no signing, so user config can't
+    /// break the commit. Panics on failure.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim_end().to_string()
+    }
+
+    /// A reftable repo with one commit on `main`, or None when git predates reftable (2.45).
+    fn reftable_repo(name: &str) -> Option<std::path::PathBuf> {
+        let v = std::process::Command::new("git").arg("--version").output().ok()?;
+        let v = String::from_utf8_lossy(&v.stdout).to_string();
+        let mut nums = v.split_whitespace().nth(2)?.split('.').map(|n| n.parse::<u32>().unwrap_or(0));
+        let (major, minor) = (nums.next()?, nums.next().unwrap_or(0));
+        if (major, minor) < (2, 45) {
+            eprintln!("skipping {}: git {} has no reftable support (needs 2.45+)", name, v.trim());
+            return None;
+        }
+        let root = scratch_dir(name);
+        let repo = root.join("repo");
+        git(&root, &["init", "-q", "--ref-format=reftable", "-b", "main", "repo"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        assert_eq!(std::fs::read_to_string(repo.join(".git/HEAD")).unwrap().trim_end(), REFTABLE_HEAD);
+        Some(root)
+    }
+
+    #[test]
+    fn reftable_repo_shows_real_branch() {
+        let Some(root) = reftable_repo("reftable_branch") else { return };
+        let seg = read_git_branch(&root.join("repo"), None);
+        assert_eq!(seg, branch_segment("main", false));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn reftable_detached_head_shows_short_sha() {
+        let Some(root) = reftable_repo("reftable_detached") else { return };
+        let repo = root.join("repo");
+        git(&repo, &["checkout", "-q", "--detach"]);
+        let sha = git(&repo, &["rev-parse", "HEAD"]);
+        let seg = read_git_branch(&repo, None);
+        assert_eq!(seg, format!(" | 🌿 {}@{}{}", COLOR_GREEN, &sha[..7], COLOR_RESET));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn reftable_worktree_shows_its_branch() {
+        let Some(root) = reftable_repo("reftable_wt") else { return };
+        let repo = root.join("repo");
+        git(&repo, &["worktree", "add", "-q", "-b", "wt-branch", "../wt"]);
+        let wt = root.join("wt");
+        let seg = read_git_branch(&wt, Some("wt"));
+        assert_eq!(seg, branch_segment("wt-branch", true));
+        assert_eq!(read_git_branch(&repo, None), branch_segment("main", false));
         std::fs::remove_dir_all(&root).unwrap();
     }
 

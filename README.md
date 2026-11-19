@@ -14,7 +14,7 @@ Every segment is omitted rather than rendered empty when its data is absent.
 
 ## Git branch
 
-Read straight from `.git/HEAD` — no `git` subprocess. The name is cut to 40 characters with a trailing `…`; it's the one field with no natural bound, and it sits ahead of the session indicators, so a long ticket-style branch would otherwise push `⏳` and `⚡` off a narrow terminal. The tail goes, since the head carries the ticket id:
+Read straight from `.git/HEAD`, with no `git` subprocess except in a reftable repo (below). The name is cut to 40 characters with a trailing `…`; it's the one field with no natural bound, and it sits ahead of the session indicators, so a long ticket-style branch would otherwise push `⏳` and `⚡` off a narrow terminal. The tail goes, since the head carries the ticket id:
 
 ```
 🌿 feature/PROJ-1482/limit-git-branch-leng…
@@ -33,6 +33,8 @@ In a linked git worktree `.git` is a file holding a `gitdir:` pointer. The statu
 ```
 
 The branch name keeps the full 40 characters. A detached HEAD in a worktree shows as `🔀 @8d879d1`. If the pointer leads nowhere, the worktree's own name from the payload is shown instead, also with 🔀. Submodules have the same `.git` shape, so they show their HEAD the same way, usually as a detached commit, and also with 🔀.
+
+A repo that uses git's reftable ref format (`git init --ref-format=reftable`) keeps a placeholder in `.git/HEAD` on purpose, and its worktrees do too. When the statusline sees that placeholder, it asks `git` for HEAD instead, so the branch, a detached commit and a worktree's branch show the same way as in any other repo. If `git` is not on `PATH` or fails, the segment shows the worktree's name, or nothing outside a worktree, rather than the placeholder.
 
 ## Context size
 
@@ -159,7 +161,7 @@ Anything that sounds like it should help here probably doesn't; `AGENTS.md` list
 
 ## Setup
 
-**Dependencies:** Rust toolchain ([rustup](https://rustup.rs)). `git` is used at *build* time to stamp the commit id into `--version`; without it the build still succeeds and reports `(unknown)`. The program never shells out to git — it reads `.git/HEAD` directly.
+**Dependencies:** Rust toolchain ([rustup](https://rustup.rs)). `git` is used at *build* time to stamp the commit id into `--version`; without it the build still succeeds and reports `(unknown)`. At run time the program reads `.git/HEAD` directly and calls `git` only in a reftable repo.
 
 ### Linux / macOS
 
@@ -237,7 +239,7 @@ Get-Content input.json | .\target\release\claude_statusline.exe
 
 Both entry points run the same two layers. `cargo test` covers the threshold and formatting logic — each colour band is asserted on *both* sides of its boundary, since a test at a comfortable midpoint passes just as happily with the constant moved. The smoke assertions then run the real binary end to end, checking the ANSI output, the `.git/HEAD` read, and `--version`, which unit tests can't reach.
 
-`cargo test` alone is the fast loop while changing thresholds — no release build, no process per case.
+`cargo test` alone is the fast loop while changing thresholds — no release build, no process per case. The reftable branch tests build real repos with `git` and skip with a message when git is older than 2.45.
 
 ## License
 
