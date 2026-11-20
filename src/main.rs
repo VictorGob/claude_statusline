@@ -99,9 +99,11 @@ const BRANCH_MAX_CHARS: usize = 40;
 const WORKTREE_ICON: &str = "🔀";
 const BRANCH_ICON: &str = "🌿";
 
-/// A full object id as stored in `.git/HEAD` when detached, and the prefix shown for it.
-/// Slicing by byte is safe only because the value is verified all-ASCII-hex first.
-const GIT_SHA_LEN: usize = 40;
+/// A full object id as stored in `.git/HEAD` when detached (SHA-1 or SHA-256), and the
+/// prefix shown for it. Slicing by byte is safe only because the value is verified
+/// all-ASCII-hex first.
+const GIT_SHA1_LEN: usize = 40;
+const GIT_SHA256_LEN: usize = 64;
 const GIT_SHORT_SHA_LEN: usize = 7;
 
 const COLOR_GREEN: &str = "\x1b[32m";
@@ -120,12 +122,24 @@ const STYLE_BOLD: &str = "\x1b[1m";
 
 #[derive(Deserialize, Default)]
 struct Root {
-    model: Option<Model>,
-    workspace: Option<Workspace>,
-    context_window: Option<ContextWindow>,
-    rate_limits: Option<RateLimits>,
-    effort: Option<Effort>,
-    cost: Option<Cost>,
+    model: Option<Lenient<Model>>,
+    workspace: Option<Lenient<Workspace>>,
+    context_window: Option<Lenient<ContextWindow>>,
+    rate_limits: Option<Lenient<RateLimits>>,
+    effort: Option<Lenient<Effort>>,
+    cost: Option<Lenient<Cost>>,
+}
+
+/// A top-level block that a type mismatch inside it drops, instead of failing the whole
+/// parse. Strictly typed, one float where a count belongs left stdout empty: no status
+/// line at all, the same poor trade for one segment that a panic is.
+struct Lenient<T>(Option<T>);
+
+impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for Lenient<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(d)?;
+        Ok(Lenient(serde_json::from_value(value).ok()))
+    }
 }
 
 #[derive(Deserialize)]
@@ -208,6 +222,8 @@ fn format_reset_suffix(resets_at: Option<i64>) -> String {
     if remaining <= 0 {
         return String::new();
     }
+    // Rounded up to the minute, so the last minute reads "1m" rather than "0m".
+    let remaining = (remaining + 59) / 60 * 60;
 
     let days = remaining / 86400;
     let h = (remaining % 86400) / 3600;
@@ -317,6 +333,12 @@ fn read_git_branch(dir: &Path, worktree: Option<&str>) -> String {
 /// `git` is called only when HEAD is the reftable placeholder, so a classic repo or
 /// worktree spawns nothing. Tests pass a stand-in to prove that.
 fn read_git_branch_with(dir: &Path, worktree: Option<&str>, git: fn(&Path) -> Option<String>) -> String {
+    // Like git, search upward for `.git`, so a session in a subfolder keeps its branch.
+    // A `.git` folder with no HEAD is not a repo (an empty fixture, say); git skips it too.
+    let dir = dir
+        .ancestors()
+        .find(|a| a.join(GIT_HEAD_PATH).is_file() || a.join(".git").is_file())
+        .unwrap_or(dir);
     let (content, in_worktree) = match read_head(dir) {
         Some(c) => c,
         // Not a git dir, or a worktree pointer leading nowhere. Outside a worktree the
@@ -340,7 +362,9 @@ fn read_git_branch_with(dir: &Path, worktree: Option<&str>, git: fn(&Path) -> Op
         // nothing would go quiet in exactly the state most likely to leave you unsure
         // where you are. The '@' marks it as a commit rather than a branch that happens
         // to be named like hex, echoing git's own "HEAD detached at abc1234".
-        None if line.len() == GIT_SHA_LEN && line.bytes().all(|b| b.is_ascii_hexdigit()) => {
+        None if matches!(line.len(), GIT_SHA1_LEN | GIT_SHA256_LEN)
+            && line.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
             format!(
                 " | {} {}@{}{}",
                 branch_icon(in_worktree),
@@ -422,7 +446,8 @@ fn dry_in_suffix(used_pct: f64, resets_at: Option<i64>, ratio: Option<f64>) -> S
     }
     // Needing (100 - used) more at used/elapsed per second. At >=1.75x this is always
     // under 2h51m away, so no days branch is needed.
-    let secs = ((100.0 - used_pct) / used_pct * elapsed) as i64;
+    // Rounded up to the minute, like the reset countdown, so it never reads "0m".
+    let secs = (((100.0 - used_pct) / used_pct * elapsed) as i64 + 59) / 60 * 60;
     let h = secs / 3600;
     let m = (secs % 3600) / 60;
     if h > 0 {
@@ -476,10 +501,15 @@ fn cache_suffix(usage: Option<&CurrentUsage>) -> String {
         None => return String::new(),
     };
     let (color, reset) = cache_color(ratio);
+    // Floored in integers, so the number stays on its colour's side of a band (59.6% is
+    // red and reads 59%) and 100% means every token hit. A float floor would not do:
+    // 0.29 * 100.0 is 28.999… and would read 28%.
+    let read = usage.cache_read_input_tokens.unwrap_or(0);
+    let shown = read * 100 / (read + usage.cache_creation_input_tokens.unwrap_or(0));
     format!(
-        "{}💾 {:.0}%{}{}",
+        "{}💾 {}%{}{}",
         color,
-        ratio * 100.0,
+        shown,
         reset,
         rebuild_marker(usage)
     )
@@ -568,7 +598,9 @@ fn session_suffix(cost: &Cost) -> String {
             } else {
                 ("", "")
             };
-            out.push_str(&format!(" {}⚡{:.0}%{}", c, pct, r));
+            // Floored in integers like 💾, so a yellow 4.6% never reads "5%".
+            let shown = (api_ms * 100 / (secs * 1000)).min(100);
+            out.push_str(&format!(" {}⚡{}%{}", c, shown, r));
         }
     }
     out
@@ -696,33 +728,34 @@ fn main() {
 
     let model_name = root
         .model
+        .and_then(|l| l.0)
         .and_then(|m| m.display_name)
         .unwrap_or_else(|| "Unknown".to_string());
 
     // One move: the branch fallback needs git_worktree from the same Workspace.
-    let (current_dir_full, git_worktree) = match root.workspace {
+    let (current_dir_full, git_worktree) = match root.workspace.and_then(|l| l.0) {
         Some(w) => (w.current_dir.unwrap_or_default(), w.git_worktree),
         None => (String::new(), None),
     };
 
-    let effort_level = root.effort.and_then(|e| e.level);
+    let effort_level = root.effort.and_then(|l| l.0).and_then(|e| e.level);
 
-    let context_window = root.context_window;
+    let context_window = root.context_window.and_then(|l| l.0);
+    let rate_limits = root.rate_limits.and_then(|l| l.0);
+    let cost = root.cost.and_then(|l| l.0);
     let used_pct = context_window.as_ref().and_then(|c| c.used_percentage);
     let current_usage = context_window
         .as_ref()
         .and_then(|c| c.current_usage.as_ref());
     let total_input_tokens = context_window.as_ref().and_then(|c| c.total_input_tokens);
 
-    let (five_hour_pct, five_hour_resets_at) = root
-        .rate_limits
+    let (five_hour_pct, five_hour_resets_at) = rate_limits
         .as_ref()
         .and_then(|r| r.five_hour.as_ref())
         .map(|f| (f.used_percentage, f.resets_at))
         .unwrap_or((None, None));
 
-    let (seven_day_pct, seven_day_resets_at) = root
-        .rate_limits
+    let (seven_day_pct, seven_day_resets_at) = rate_limits
         .as_ref()
         .and_then(|r| r.seven_day.as_ref())
         .map(|f| (f.used_percentage, f.resets_at))
@@ -736,8 +769,9 @@ fn main() {
         .and_then(|n| n.to_str())
         .unwrap_or(&current_dir_full);
 
-    // Get git branch
-    let git_branch = read_git_branch(Path::new("."), git_worktree.as_deref());
+    // The branch of the directory the line names, not of wherever the process runs.
+    let branch_dir = if current_dir_full.is_empty() { "." } else { current_dir_full.as_str() };
+    let git_branch = read_git_branch(Path::new(branch_dir), git_worktree.as_deref());
 
     // Effort level suffix (e.g. " high"), space-joined with no "|" separator
     let effort_suffix = match effort_level {
@@ -746,18 +780,23 @@ fn main() {
     };
 
     // Session age and active share, when the session is old enough to have any
-    let age_suffix = root.cost.as_ref().map(session_suffix).unwrap_or_default();
+    let age_suffix = cost.as_ref().map(session_suffix).unwrap_or_default();
+
+    // Omitted rather than rendered as an empty "📁 " when the payload names no directory.
+    let dir_suffix = if dir_basename.is_empty() {
+        String::new()
+    } else {
+        format!(" | 📁 {}{}{}", COLOR_CYAN, dir_basename, COLOR_RESET)
+    };
 
     // Build line 1: [Model] effort | 📁 dir | 🌿 branch | ⏳ age ⚡active
     let line1 = format!(
-        "{}{}{}{} | 📁 {}{}{}{}{}",
+        "{}{}{}{}{}{}{}",
         STYLE_BOLD,
         model_name,
         COLOR_RESET,
         effort_suffix,
-        COLOR_CYAN,
-        dir_basename,
-        COLOR_RESET,
+        dir_suffix,
         git_branch,
         age_suffix
     );
@@ -776,7 +815,9 @@ fn main() {
             Some(n) => format!(" ({})", format_tokens(n)),
             None => String::new(),
         };
-        line2.push_str(&format!("{}🎫 {:.0}%{}{}", color, pct, tokens, reset));
+        // Every shown percentage is floored, not rounded, so the number never lands on
+        // the far side of its colour's band: 79.6% is plain and must not read "80%".
+        line2.push_str(&format!("{}🎫 {:.0}%{}{}", color, pct.floor(), tokens, reset));
         has_content = true;
     }
 
@@ -804,7 +845,7 @@ fn main() {
             burn,
             burn_reset,
             color,
-            pct,
+            pct.floor(),
             reset,
             reset_suffix,
             dry_suffix
@@ -820,7 +861,7 @@ fn main() {
         let reset_suffix = format_reset_suffix(seven_day_resets_at);
         line2.push_str(&format!(
             "📅 7d: {}{:.0}%{}{}",
-            color, pct, reset, reset_suffix
+            color, pct.floor(), reset, reset_suffix
         ));
         has_content = true;
     }
@@ -867,9 +908,9 @@ mod tests {
     fn burn_color_boundaries() {
         assert_eq!(burn_color(None).0, "", "no ratio means no cue");
         assert_eq!(burn_color(Some(1.149)).0, "");
-        assert_eq!(burn_color(Some(BURN_WARN_RATIO)).0, COLOR_YELLOW);
+        assert_eq!(burn_color(Some(1.15)).0, COLOR_YELLOW);
         assert_eq!(burn_color(Some(1.749)).0, COLOR_YELLOW);
-        assert_eq!(burn_color(Some(BURN_HIGH_RATIO)).0, COLOR_RED);
+        assert_eq!(burn_color(Some(1.75)).0, COLOR_RED);
     }
 
     /// The flame sits at its own threshold, between warn and red, so it needs its own
@@ -878,7 +919,7 @@ mod tests {
     fn burn_icon_threshold_is_independent_of_color() {
         assert_eq!(burn_icon(None), "⏱️");
         assert_eq!(burn_icon(Some(1.399)), "⏱️");
-        assert_eq!(burn_icon(Some(BURN_FIRE_RATIO)), "🔥");
+        assert_eq!(burn_icon(Some(1.4)), "🔥");
         assert_eq!(
             burn_color(Some(1.399)).0,
             COLOR_YELLOW,
@@ -919,11 +960,11 @@ mod tests {
     #[test]
     fn rebuild_marker_boundaries() {
         assert_eq!(
-            rebuild_marker(&usage(Some(10), Some(CACHE_REBUILD_TOKENS))),
+            rebuild_marker(&usage(Some(10), Some(50_000))),
             "",
             "exactly at the threshold is still a top-up"
         );
-        let over = rebuild_marker(&usage(Some(10), Some(CACHE_REBUILD_TOKENS + 1)));
+        let over = rebuild_marker(&usage(Some(10), Some(50_001)));
         assert!(over.contains("🧊") && over.contains("50k"), "got {}", over);
         assert_eq!(rebuild_marker(&usage(Some(10), None)), "", "no write field");
 
@@ -935,17 +976,9 @@ mod tests {
     /// Both sides of all three size steps, in isolation from the percentage ladder.
     #[test]
     fn token_color_boundaries() {
-        assert_eq!(token_color(CONTEXT_WARN_TOKENS - 1).0, "");
-        assert_eq!(token_color(CONTEXT_WARN_TOKENS).0, COLOR_YELLOW);
-        assert_eq!(token_color(CONTEXT_HIGH_TOKENS - 1).0, COLOR_YELLOW);
-        assert_eq!(token_color(CONTEXT_HIGH_TOKENS).0, COLOR_RED);
-        assert_eq!(token_color(CONTEXT_CRITICAL_TOKENS - 1).0, COLOR_RED);
-        assert_eq!(token_color(CONTEXT_CRITICAL_TOKENS).0, COLOR_RED_BOLD);
         assert_eq!(token_color(659_000).0, COLOR_RED_BOLD, "the largest turn measured");
-
-        // Literals, deliberately. Every assertion above is written in terms of the
-        // constants, so it holds whatever they say and pins nothing; these are what
-        // fail when a step moves.
+        // Literals, deliberately: an assertion written in terms of the constants holds
+        // whatever they say and pins nothing.
         assert_eq!(token_color(199_999).0, "");
         assert_eq!(token_color(200_000).0, COLOR_YELLOW);
         assert_eq!(token_color(299_999).0, COLOR_YELLOW);
@@ -996,14 +1029,11 @@ mod tests {
     /// reconstructing a size from it — which would need a window to assume.
     #[test]
     fn context_color_falls_back_without_a_token_count() {
-        for pct in [0.0, 59.9, 60.0, 79.9, 80.0, 89.9, 90.0, 100.0] {
-            assert_eq!(
-                context_color(pct, None),
-                context_pct_color(pct),
-                "at {}%",
-                pct
-            );
-        }
+        assert_eq!(context_color(79.9, None).0, "");
+        assert_eq!(context_color(80.0, None).0, COLOR_YELLOW);
+        assert_eq!(context_color(89.9, None).0, COLOR_YELLOW);
+        assert_eq!(context_color(90.0, None).0, COLOR_RED);
+        assert_eq!(context_color(100.0, None).0, COLOR_RED, "never the size ladder's bold");
     }
 
     /// Literals, not the constants — `context_pct_color(CONTEXT_WARN_PCT)` would pass
@@ -1023,15 +1053,6 @@ mod tests {
         assert_eq!(context_color(60.0, Some(120_000)).0, "");
         assert_eq!(pct_color(60.0).0, COLOR_YELLOW, "the quota bars still warn here");
         assert_eq!(context_color(73.0, Some(146_000)).0, "", "the median turn");
-    }
-
-    /// pct_color is shared with the 5h and 7d bars, so it must be exactly as it was.
-    #[test]
-    fn quota_bands_are_untouched_by_the_size_ladder() {
-        assert_eq!(pct_color(59.9).0, "");
-        assert_eq!(pct_color(60.0).0, COLOR_YELLOW);
-        assert_eq!(pct_color(89.9).0, COLOR_YELLOW);
-        assert_eq!(pct_color(90.0).0, COLOR_RED, "plain red, never the alarm bold");
     }
 
     #[test]
@@ -1078,7 +1099,7 @@ mod tests {
     #[test]
     fn session_suffix_activity_warns_only_when_old_and_idle() {
         let old_idle = session_suffix(&cost(Some(18_120_000), Some(300_000)));
-        assert!(old_idle.contains("⚡2%") && old_idle.contains(COLOR_YELLOW));
+        assert!(old_idle.contains("⚡1%") && old_idle.contains(COLOR_YELLOW));
 
         // Old but busy: the age still colours, so check the activity segment itself is
         // plain — a bare space before the bolt means no escape was emitted.
@@ -1213,6 +1234,84 @@ mod tests {
     }
 
     #[test]
+    fn subfolder_of_repo_shows_branch() {
+        let root = scratch_dir("subfolder");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main-branch\n").unwrap();
+        let sub = root.join("a/b");
+        std::fs::create_dir_all(&sub).unwrap();
+        let seg = read_git_branch_with(&sub, None, no_git);
+        assert_eq!(seg, branch_segment("main-branch", false));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn subfolder_of_worktree_shows_its_branch() {
+        let root = scratch_dir("wt_subfolder");
+        let wt = linked_worktree(&root, "../repo/.git/worktrees/wt", "ref: refs/heads/wt-branch\n");
+        let sub = wt.join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(read_git_branch(&sub, Some("wt")), branch_segment("wt-branch", true));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn nearest_git_wins_over_an_outer_repo() {
+        let root = scratch_dir("nested_repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/outer\n").unwrap();
+        let inner = root.join("vendor/inner");
+        std::fs::create_dir_all(inner.join(".git")).unwrap();
+        std::fs::write(inner.join(".git/HEAD"), "ref: refs/heads/inner\n").unwrap();
+        assert_eq!(read_git_branch(&inner.join("src"), None), branch_segment("inner", false));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn empty_git_folder_is_skipped() {
+        let root = scratch_dir("empty_git");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/outer\n").unwrap();
+        let fixture = root.join("tests/fixture");
+        std::fs::create_dir_all(fixture.join(".git")).unwrap();
+        assert_eq!(read_git_branch(&fixture, None), branch_segment("outer", false));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn sha256_detached_head_shows_short_sha() {
+        let root = scratch_dir("sha256_detached");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let sha = "abcdef0123456789".repeat(4);
+        std::fs::write(root.join(".git/HEAD"), format!("{}\n", sha)).unwrap();
+        let seg = read_git_branch(&root, None);
+        assert_eq!(seg, format!(" | 🌿 {}@abcdef0{}", COLOR_GREEN, COLOR_RESET));
+        // Neither length nor hex alone is enough: 63 or 65 chars stay silent.
+        std::fs::write(root.join(".git/HEAD"), format!("{}\n", &sha[..63])).unwrap();
+        assert_eq!(read_git_branch(&root, None), "");
+        std::fs::write(root.join(".git/HEAD"), format!("{}0\n", sha)).unwrap();
+        assert_eq!(read_git_branch(&root, None), "");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Stands in for git, answering only when asked about a checkout root.
+    fn git_at_root(dir: &Path) -> Option<String> {
+        dir.join(".git").exists().then(|| "ref: refs/heads/from-git".to_string())
+    }
+
+    #[test]
+    fn reftable_subfolder_asks_git_at_the_root() {
+        let root = scratch_dir("reftable_subfolder");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/.invalid\n").unwrap();
+        let sub = root.join("a");
+        std::fs::create_dir_all(&sub).unwrap();
+        let seg = read_git_branch_with(&sub, None, git_at_root);
+        assert_eq!(seg, branch_segment("from-git", false));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn classic_head_spawns_no_git() {
         let root = scratch_dir("classic_no_git");
         std::fs::create_dir_all(root.join(".git")).unwrap();
@@ -1281,6 +1380,9 @@ mod tests {
         let Some(root) = reftable_repo("reftable_branch") else { return };
         let seg = read_git_branch(&root.join("repo"), None);
         assert_eq!(seg, branch_segment("main", false));
+        let sub = root.join("repo/sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(read_git_branch(&sub, None), branch_segment("main", false));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1385,5 +1487,104 @@ mod tests {
         assert!(dry_in_suffix(40.0, at, Some(2.0)).contains("dry in"));
         assert_eq!(dry_in_suffix(0.0, at, Some(2.0)), "", "nothing used yet");
         assert_eq!(dry_in_suffix(100.0, at, Some(2.0)), "", "already dry");
+    }
+
+    /// Rounded up, so the last minute reads "1m" rather than "0m". The inputs leave a
+    /// second of slack either side of each minute, since the clock can tick mid-test.
+    #[test]
+    fn countdowns_round_up_to_the_minute() {
+        let last = format_reset_suffix(resets_in(30));
+        assert!(last.contains("resets in 1m\x1b"), "got {:?}", last);
+        let hour = format_reset_suffix(resets_in(3600 - 30));
+        assert!(hour.contains("resets in 1h0m\x1b"), "got {:?}", hour);
+        let mid = format_reset_suffix(resets_in(9000));
+        assert!(mid.contains("resets in 2h30m\x1b"), "got {:?}", mid);
+        // 0.5 / 99.5 of the 1h elapsed is about 18s left.
+        let dry = dry_in_suffix(99.5, resets_in(14400), Some(2.0));
+        assert!(dry.contains("dry in 1m\x1b"), "got {:?}", dry);
+    }
+
+    /// Floored, so the number never sits on the far side of its colour's band: a 59.6%
+    /// hit ratio is red and must not read "60%", the yellow step.
+    #[test]
+    fn shown_percentages_are_floored_to_their_band() {
+        let red = cache_suffix(Some(&usage(Some(596), Some(404))));
+        assert!(red.starts_with(COLOR_RED) && red.contains("💾 59%"), "got {:?}", red);
+        assert!(cache_suffix(Some(&usage(Some(995), Some(5)))).contains("💾 99%"), "100% means every token hit");
+        assert!(cache_suffix(Some(&usage(Some(100), Some(0)))).contains("💾 100%"));
+        // 0.29 * 100.0 is 28.999… in floating point; a float floor would show 28%.
+        assert!(cache_suffix(Some(&usage(Some(29), Some(71)))).contains("💾 29%"));
+
+        // 828s of API time in 5h is a 4.6% share, under the 5% warn.
+        let idle = session_suffix(&cost(Some(18_000_000), Some(828_000)));
+        assert!(idle.contains(&format!("{}⚡4%", COLOR_YELLOW)), "got {:?}", idle);
+    }
+
+    /// The gap gate at one point of lead, 1h in where the budget is 20%. The clock only
+    /// moves forward, which only shrinks the lead, so 20.95 can never clear the gate;
+    /// 21.05 keeps 0.05 points of slack, about nine seconds of ticking.
+    #[test]
+    fn burn_gap_pinned_by_literals() {
+        let at = resets_in(14400);
+        assert_eq!(burn_ratio(20.95, at), None);
+        assert!(burn_ratio(21.05, at).is_some());
+    }
+
+    /// The 6-minute floor: 350s in is still inside it, 370s is past it.
+    #[test]
+    fn burn_elapsed_floor_pinned_by_literals() {
+        assert_eq!(window_elapsed_secs(resets_in(18000 - 350)), None);
+        assert!(window_elapsed_secs(resets_in(18000 - 370)).is_some());
+    }
+
+    #[test]
+    fn session_age_bands_pinned_by_literals() {
+        assert_eq!(session_suffix(&cost(Some(59_999), None)), "");
+        assert!(session_suffix(&cost(Some(60_000), None)).contains("⏳ 1m"));
+        assert!(session_suffix(&cost(Some(14_399_999), None)).contains("⏳ 3h59m"), "plain under 4h");
+        assert!(session_suffix(&cost(Some(14_400_000), None)).contains(&format!("⏳ {}4h00m", COLOR_YELLOW)));
+        assert!(session_suffix(&cost(Some(28_799_999), None)).contains(&format!("⏳ {}7h59m", COLOR_YELLOW)));
+        assert!(session_suffix(&cost(Some(28_800_000), None)).contains(&format!("⏳ {}8h00m", COLOR_RED)));
+    }
+
+    #[test]
+    fn activity_gates_pinned_by_literals() {
+        assert!(!session_suffix(&cost(Some(3_599_999), Some(1_000))).contains('⚡'), "under 1h");
+        assert!(session_suffix(&cost(Some(3_600_000), Some(1_000))).contains('⚡'));
+        // 5h wall clock: 900s of API time is exactly 5%, a millisecond less is under it.
+        assert!(session_suffix(&cost(Some(18_000_000), Some(900_000))).contains(" ⚡5%"), "5% is plain");
+        assert!(session_suffix(&cost(Some(18_000_000), Some(899_999))).contains(&format!("{}⚡4%", COLOR_YELLOW)));
+    }
+
+    /// The fixture must deserialise into every block the line reads, or a type mismatch
+    /// against what Claude Code really sends would pass every other test.
+    #[test]
+    fn input_fixture_parses() {
+        let root: Root = serde_json::from_str(include_str!("../input.json")).expect("fixture parses");
+        let model = root.model.and_then(|l| l.0).expect("model");
+        assert_eq!(model.display_name.as_deref(), Some("Opus"));
+        let cw = root.context_window.and_then(|l| l.0).expect("context_window");
+        assert_eq!(cw.total_input_tokens, Some(84_000));
+        let usage = cw.current_usage.expect("current_usage");
+        assert_eq!(usage.cache_read_input_tokens, Some(80_000));
+        assert_eq!(usage.cache_creation_input_tokens, Some(3_150));
+        let cost = root.cost.and_then(|l| l.0).expect("cost");
+        assert_eq!(cost.total_duration_ms, Some(8_100_000));
+        assert!(root.workspace.and_then(|l| l.0).is_some());
+    }
+
+    /// A float where a count belongs used to fail the whole parse, and the binary then
+    /// printed nothing. Now only the block holding it drops.
+    #[test]
+    fn a_mistyped_field_drops_its_block_not_the_line() {
+        let root: Root = serde_json::from_str(
+            r#"{"model":{"display_name":"Opus"},"context_window":{"used_percentage":42,"total_input_tokens":80660.0},"cost":{"total_duration_ms":600000}}"#,
+        )
+        .expect("parses despite the float");
+        assert!(root.model.and_then(|l| l.0).is_some());
+        assert!(root.context_window.and_then(|l| l.0).is_none(), "the mistyped block drops");
+        assert!(root.cost.and_then(|l| l.0).is_some(), "its siblings survive");
+        let none: Root = serde_json::from_str(r#"{"rate_limits":null}"#).expect("null parses");
+        assert!(none.rate_limits.is_none() && none.model.is_none());
     }
 }

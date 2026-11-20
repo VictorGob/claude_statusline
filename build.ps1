@@ -87,16 +87,30 @@ function Invoke-NoStdin([string[]]$Arguments, [int]$TimeoutMs = 5000) {
     return @{ TimedOut = $false; Output = $out; ExitCode = $code }
 }
 
-# Runs the binary from inside a throwaway directory holding a synthetic .git/HEAD. The
-# branch is read relative to the working directory, so this is what makes the detached-HEAD
-# path assertable without touching the real repo. $Target is absolute, so it still resolves.
-function Invoke-StatuslineWithHead([string]$HeadContent, [string]$Json) {
+# Points the payload's current_dir at $Dir. The branch is read from current_dir, not the
+# working directory, so this is what aims the binary at a throwaway repo. The working
+# directory stays in this repo, so a regression to reading "." renders the wrong branch.
+function Set-CurrentDir([string]$Json, [string]$Dir) {
+    $out = $Json.Replace('"current_dir":"/tmp"', '"current_dir":"' + $Dir.Replace('\', '\\') + '"')
+    # Unreplaced, the binary would read this repo and a "stays silent" check would pass blind.
+    if ($out -ceq $Json) { throw "Set-CurrentDir: payload has no `"current_dir`":`"/tmp`"" }
+    return $out
+}
+
+# Runs the binary against a throwaway directory holding a synthetic .git/HEAD, which makes
+# the detached-HEAD path assertable without touching the real repo. With $SubDir,
+# current_dir names that folder below the repo root instead of the root itself.
+function Invoke-StatuslineWithHead([string]$HeadContent, [string]$Json, [string]$SubDir = "") {
     $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("statusline_head_" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force (Join-Path $dir ".git") | Out-Null
     try {
         Set-Content (Join-Path $dir ".git\HEAD") $HeadContent -NoNewline
-        Push-Location $dir
-        try { return ($Json | & $Target | Out-String) } finally { Pop-Location }
+        $currentDir = $dir
+        if ($SubDir) {
+            $currentDir = Join-Path $dir $SubDir
+            New-Item -ItemType Directory -Force $currentDir | Out-Null
+        }
+        return ((Set-CurrentDir $Json $currentDir) | & $Target | Out-String)
     } finally {
         Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -112,8 +126,7 @@ function Invoke-StatuslineInWorktree([string]$Json, [switch]$NoGit) {
         if (-not $NoGit) {
             Set-Content (Join-Path $dir ".git") "gitdir: /some/repo/.git/worktrees/feat" -NoNewline
         }
-        Push-Location $dir
-        try { return ($Json | & $Target | Out-String) } finally { Pop-Location }
+        return ((Set-CurrentDir $Json $dir) | & $Target | Out-String)
     } finally {
         Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -180,6 +193,20 @@ function Invoke-Test {
 
     Write-Host "Testing reasoning effort level..."
     Write-Host (Invoke-Statusline '{"model":{"display_name":"Opus"},"effort":{"level":"high"},"workspace":{"current_dir":"/home/user/project"}}')
+
+    Write-Host "Testing a missing workspace renders no empty directory segment..."
+    Assert-Output -Json '{"model":{"display_name":"Opus"}}' `
+        -Needle "$([char]0xD83D)$([char]0xDCC1)" -ShouldContain $false `
+        -PassMessage "no workspace, no directory segment" -FailMessage "empty directory segment rendered"
+
+    Write-Host "Testing a mistyped field drops its block, not the whole line (float token count)..."
+    Assert-Output -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":42,"total_input_tokens":80660.0}}' `
+        -Needle "Opus" -ShouldContain $true `
+        -PassMessage "line 1 survives a float in a count" -FailMessage "a float blanked the status line"
+
+    Write-Host "Testing the input.json fixture renders both lines..."
+    $fixtureLines = @(Get-Content (Join-Path $RepoRoot "input.json") -Raw | & $Target)
+    Assert-True ($fixtureLines.Count -eq 2) "fixture renders 2 lines" "fixture did not render 2 lines"
 
     Write-Host "Testing clickable usage link on rate limit countdown..."
     Assert-Output `
@@ -295,7 +322,7 @@ function Invoke-Test {
     $longSession = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":18120000,"total_api_duration_ms":300000}}'
     Assert-Output -Json $longSession -Needle "$ESC[33m5h02m" -ShouldContain $true `
         -PassMessage "yellow age past 4h" -FailMessage "missing yellow age"
-    Assert-Output -Json $longSession -Needle "${Bolt}2%" -ShouldContain $true `
+    Assert-Output -Json $longSession -Needle "${Bolt}1%" -ShouldContain $true `
         -PassMessage "activity shown on long session" -FailMessage "activity missing"
 
     Write-Host "Testing a short session shows age but no activity (10m wall)..."
@@ -311,6 +338,12 @@ function Invoke-Test {
         -Needle "${Bolt}100%" -ShouldContain $true `
         -PassMessage "activity clamped to 100%" -FailMessage "activity exceeded 100%"
 
+    Write-Host "Testing session age turns red at 8h (8h00m wall)..."
+    Assert-Output `
+        -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":28800000,"total_api_duration_ms":28800000}}' `
+        -Needle "$ESC[31m8h00m" -ShouldContain $true `
+        -PassMessage "red age at 8h" -FailMessage "missing red age"
+
     # --- Context size -----------------------------------------------------------
     # The size ladder is absolute. Every case below pairs a size with a percentage the
     # other ladder would render differently, so none can pass from the wrong ladder.
@@ -324,6 +357,15 @@ function Invoke-Test {
     Write-Host "Testing the percentage stands alone when no token count is sent..."
     Assert-True ((Invoke-Statusline ($ctx + '{"used_percentage":42}}')) -match "$Ticket 42%\s*$") `
         "bare percentage unchanged" "bare percentage altered"
+
+    Write-Host "Testing the context percentage warns at 80% with no token count..."
+    Assert-Output -Json ($ctx + '{"used_percentage":80}}') `
+        -Needle "$ESC[33m$Ticket 80%" -ShouldContain $true `
+        -PassMessage "yellow at 80%" -FailMessage "no warn step at 80%"
+
+    Write-Host "Testing a shown percentage is floored to its band (79.6% context reads 79%, plain)..."
+    Assert-True ((Invoke-Statusline ($ctx + '{"used_percentage":79.6}}')) -match "(?m)^$Ticket 79%\s*$") `
+        "79.6% shows as a plain 79%" "79.6% rounded across the 80% step"
 
     Write-Host "Testing the size ladder: 199k at 30% is under the warn step..."
     # Anchored to the start of a line: an unanchored escape check would match line 1's
@@ -366,6 +408,11 @@ function Invoke-Test {
         -Needle "$ESC[31m" -ShouldContain $false `
         -PassMessage "75% quota is still yellow" -FailMessage "quota bars moved with the context bands"
 
+    Write-Host "Testing a quota percentage is floored to its band (59.6% reads 59%, plain)..."
+    Assert-Output -Json '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":59.6}}}' `
+        -Needle "5h: 59%" -ShouldContain $true `
+        -PassMessage "59.6% shows as 59%" -FailMessage "59.6% rounded across the 60% step"
+
     # --- Detached HEAD ----------------------------------------------------------
     $headJson = '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}'
     $Herb = "$([char]0xD83C)$([char]0xDF3F)"
@@ -393,8 +440,7 @@ function Invoke-Test {
     try {
         Set-Content (Join-Path $wtGitdir "HEAD") "ref: refs/heads/wt-branch" -NoNewline
         Set-Content (Join-Path $wtDir ".git") "gitdir: $wtGitdir" -NoNewline
-        Push-Location $wtDir
-        try { $wtOut = ($wtJson | & $Target | Out-String) } finally { Pop-Location }
+        $wtOut = ((Set-CurrentDir $wtJson $wtDir) | & $Target | Out-String)
     } finally {
         Remove-Item $wtRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -407,8 +453,15 @@ function Invoke-Test {
         "no field, no segment" "rendered a branch with nothing to render"
 
     Write-Host "Testing a plain non-git folder is unaffected by the fallback..."
-    Assert-True (-not (Invoke-StatuslineInWorktree $headJson -NoGit).Contains($Herb)) `
-        "non-git folder stays silent" "non-git folder rendered a branch"
+    # The branch search walks up, so a repo above the temp folder would render its branch.
+    $tempInRepo = $false
+    try { git -C ([System.IO.Path]::GetTempPath()) rev-parse 2>$null | Out-Null; $tempInRepo = ($LASTEXITCODE -eq 0) } catch {}
+    if ($tempInRepo) {
+        Write-Host "SKIP: the temp folder is inside a git repo"
+    } else {
+        Assert-True (-not (Invoke-StatuslineInWorktree $headJson -NoGit).Contains($Herb)) `
+            "non-git folder stays silent" "non-git folder rendered a branch"
+    }
 
     Write-Host "Testing a real branch wins over the worktree field (fast path first)..."
     Assert-True (-not (Invoke-StatuslineWithHead "ref: refs/heads/real-branch" `
@@ -418,6 +471,10 @@ function Invoke-Test {
     Write-Host "Testing a normal ref still renders the branch name..."
     Assert-True ((Invoke-StatuslineWithHead "ref: refs/heads/some-branch" $headJson).Contains("some-branch")) `
         "ref renders branch name" "ref did not render the branch name"
+
+    Write-Host "Testing a subfolder of a repo still shows the branch..."
+    Assert-True ((Invoke-StatuslineWithHead "ref: refs/heads/sub-branch" $headJson "a\b").Contains("sub-branch")) `
+        "subfolder shows the branch" "subfolder lost the branch"
 
     # --- Version ----------------------------------------------------------------
     # Mirrors the --version block in the Makefile. Every call here runs with stdin

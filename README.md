@@ -14,10 +14,10 @@ Every segment is omitted rather than rendered empty when its data is absent.
 
 ## Git branch
 
-Read straight from `.git/HEAD`, with no `git` subprocess except in a reftable repo (below). The name is cut to 40 characters with a trailing `…`; it's the one field with no natural bound, and it sits ahead of the session indicators, so a long ticket-style branch would otherwise push `⏳` and `⚡` off a narrow terminal. The tail goes, since the head carries the ticket id:
+Read straight from `.git/HEAD`, found from the session's directory or its nearest parent, with no `git` subprocess except in a reftable repo (below). The name is cut to 40 characters with a trailing `…`; it's the one field with no natural bound, and it sits ahead of the session indicators, so a long ticket-style branch would otherwise push `⏳` and `⚡` off a narrow terminal. The tail goes, since the head carries the ticket id:
 
 ```
-🌿 feature/PROJ-1482/limit-git-branch-leng…
+🌿 feature/ABC-12345/limit-git-branch-leng…
 ```
 
 On a detached HEAD there's no branch to show, so it falls back to the short commit id rather than going blank — which would leave the line quietest exactly when you're least sure where you are. The `@` marks it a commit rather than a branch named like hex:
@@ -195,7 +195,7 @@ Add to `~/.claude/settings.json`:
 .\build.ps1 -Test     # build + cargo test + smoke tests
 ```
 
-Point `settings.json` straight at the binary — `statusline.sh` is bash-only, and invoking the executable directly keeps the working directory that the git branch lookup relies on:
+Point `settings.json` straight at the binary — `statusline.sh` is bash-only, and invoking the executable directly is the simplest setup:
 
 ```json
 {

@@ -57,6 +57,12 @@ test: $(TARGET)
 	@echo ""
 	@echo "Testing reasoning effort level..."
 	@echo '{"model":{"display_name":"Opus"},"effort":{"level":"high"},"workspace":{"current_dir":"/home/user/project"}}' | ./$(TARGET)
+	@echo "Testing a missing workspace renders no empty directory segment..."
+	@echo '{"model":{"display_name":"Opus"}}' | ./$(TARGET) | grep -q '📁' && echo "FAIL: empty directory segment rendered" || echo "PASS: no workspace, no directory segment"
+	@echo "Testing a mistyped field drops its block, not the whole line (float token count)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":42,"total_input_tokens":80660.0}}' | ./$(TARGET) 2>/dev/null | grep -q 'Opus' && echo "PASS: line 1 survives a float in a count" || echo "FAIL: a float blanked the status line"
+	@echo "Testing the input.json fixture renders both lines..."
+	@[ "$$(./$(TARGET) < input.json | wc -l | tr -d ' ')" = 2 ] && echo "PASS: fixture renders 2 lines" || echo "FAIL: fixture did not render 2 lines"
 	@echo ""
 	@echo "Testing burn rate over budget (1h elapsed, 35% used = 35%/h)..."
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":35,"resets_at":'$$(( $$(date +%s) + 14400 ))'}}}' | ./$(TARGET) | grep -q '🔥' && echo "PASS: flame shown over 28%/h" || echo "FAIL: flame missing"
@@ -94,17 +100,23 @@ test: $(TARGET)
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":60,"current_usage":null}}' | ./$(TARGET) | grep -q '💾' && echo "FAIL: null usage should render nothing" || echo "PASS: no cache cue without usage"
 	@echo "Testing session age warns and shows activity (5h02m wall, 5m API)..."
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":18120000,"total_api_duration_ms":300000}}' | ./$(TARGET) | grep -q "$$(printf '\033')\[33m5h02m" && echo "PASS: yellow age past 4h" || echo "FAIL: missing yellow age"
-	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":18120000,"total_api_duration_ms":300000}}' | ./$(TARGET) | grep -q '⚡2%' && echo "PASS: activity shown on long session" || echo "FAIL: activity missing"
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":18120000,"total_api_duration_ms":300000}}' | ./$(TARGET) | grep -q '⚡1%' && echo "PASS: activity shown on long session" || echo "FAIL: activity missing"
 	@echo "Testing a short session shows age but no activity (10m wall)..."
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":600000,"total_api_duration_ms":120000}}' | ./$(TARGET) | grep -q '⏳ 10m' && echo "PASS: 10m age shown plain" || echo "FAIL: age missing"
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":600000,"total_api_duration_ms":120000}}' | ./$(TARGET) | grep -q '⚡' && echo "FAIL: activity meaningless under 1h" || echo "PASS: no activity cue under 1h"
 	@echo "Testing activity clamps at 100% (parallel subagents sum past wall clock)..."
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":7200000,"total_api_duration_ms":18000000}}' | ./$(TARGET) | grep -q '⚡100%' && echo "PASS: activity clamped to 100%" || echo "FAIL: activity exceeded 100%"
+	@echo "Testing session age turns red at 8h (8h00m wall)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"cost":{"total_duration_ms":28800000,"total_api_duration_ms":28800000}}' | ./$(TARGET) | grep -q "$$(printf '\033')\[31m8h00m" && echo "PASS: red age at 8h" || echo "FAIL: missing red age"
 	@echo ""
 	@echo "Testing context shows absolute tokens beside the percentage..."
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":42,"total_input_tokens":84000}}' | ./$(TARGET) | grep -q '🎫 42% (84k)' && echo "PASS: token count shown" || echo "FAIL: token count missing"
 	@echo "Testing the percentage stands alone when no token count is sent..."
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":42}}' | ./$(TARGET) | grep -q '🎫 42%$$' && echo "PASS: bare percentage unchanged" || echo "FAIL: bare percentage altered"
+	@echo "Testing the context percentage warns at 80% with no token count..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":80}}' | ./$(TARGET) | grep -q "$$(printf '\033')\[33m🎫 80%" && echo "PASS: yellow at 80%" || echo "FAIL: no warn step at 80%"
+	@echo "Testing a shown percentage is floored to its band (79.6% context reads 79%, plain)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":79.6}}' | ./$(TARGET) | grep -q '^🎫 79%$$' && echo "PASS: 79.6% shows as a plain 79%" || echo "FAIL: 79.6% rounded across the 80% step"
 	@echo "Testing the size ladder: 199k at 30% is under the warn step..."
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":30,"total_input_tokens":199000}}' | ./$(TARGET) | grep -q '^🎫 30% (199k)' && echo "PASS: 199k at 30% stays plain" || echo "FAIL: 199k should be uncoloured at 30%"
 	@echo "Testing the size ladder: 200k at 30% warns where the percentage sees nothing..."
@@ -121,41 +133,48 @@ test: $(TARGET)
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":92}}' | ./$(TARGET) | grep -q "$$(printf '\033')\[31m🎫" && echo "PASS: falls back to plain red" || echo "FAIL: fallback colouring lost"
 	@echo "Testing the 5h bar keeps the old bands at 75% (pct_color untouched)..."
 	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":75}}}' | ./$(TARGET) | grep -q "$$(printf '\033')\[31m" && echo "FAIL: quota bars moved with the context bands" || echo "PASS: 75% quota is still yellow"
+	@echo "Testing a quota percentage is floored to its band (59.6% reads 59%, plain)..."
+	@echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"rate_limits":{"five_hour":{"used_percentage":59.6}}}' | ./$(TARGET) | grep -q '5h: 59%' && echo "PASS: 59.6% shows as 59%" || echo "FAIL: 59.6% rounded across the 60% step"
 	@echo ""
 	@echo "Testing a detached HEAD shows the short SHA..."
 	@tmp=$$(mktemp -d) && mkdir -p $$tmp/.git && echo '1234567890abcdef1234567890abcdef12345678' > $$tmp/.git/HEAD && \
-	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q '@1234567' \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"'"$$tmp"'"}}' | $(CURDIR)/$(TARGET) | grep -q '@1234567' \
 	  && echo "PASS: detached HEAD shows @1234567" || echo "FAIL: detached HEAD did not render the short SHA"; rm -rf $$tmp
 	@echo "Testing a worktree gitdir pointer renders no branch..."
 	@tmp=$$(mktemp -d) && mkdir -p $$tmp/.git && echo 'gitdir: /some/worktree/path' > $$tmp/.git/HEAD && \
-	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q '🌿' \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"'"$$tmp"'"}}' | $(CURDIR)/$(TARGET) | grep -q '🌿' \
 	  && echo "FAIL: gitdir pointer rendered a branch" || echo "PASS: gitdir pointer stays silent"; rm -rf $$tmp
 	@echo "Testing a real worktree (.git is a FILE) falls back to the worktree name..."
 	@tmp=$$(mktemp -d) && echo 'gitdir: /some/repo/.git/worktrees/feat' > $$tmp/.git && \
-	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp","git_worktree":"my-feature"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q '🔀 .*my-feature' \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"'"$$tmp"'","git_worktree":"my-feature"}}' | $(CURDIR)/$(TARGET) | grep -q '🔀 .*my-feature' \
 	  && echo "PASS: worktree name shown when HEAD is unreadable" || echo "FAIL: worktree fallback missing"; rm -rf $$tmp
 	@echo "Testing a real worktree follows its gitdir pointer to the branch..."
 	@tmp=$$(mktemp -d) && mkdir -p $$tmp/repo/.git/worktrees/feat $$tmp/wt && \
 	  echo 'ref: refs/heads/wt-branch' > $$tmp/repo/.git/worktrees/feat/HEAD && \
 	  echo "gitdir: $$tmp/repo/.git/worktrees/feat" > $$tmp/wt/.git && \
-	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp","git_worktree":"my-feature"}}' | (cd $$tmp/wt && $(CURDIR)/$(TARGET)) | grep -q '🔀 .*wt-branch' \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"'"$$tmp/wt"'","git_worktree":"my-feature"}}' | $(CURDIR)/$(TARGET) | grep -q '🔀 .*wt-branch' \
 	  && echo "PASS: worktree shows its branch" || echo "FAIL: worktree branch not read through gitdir"; rm -rf $$tmp
 	@echo "Testing a worktree-shaped .git without the field stays silent..."
 	@tmp=$$(mktemp -d) && echo 'gitdir: /some/repo/.git/worktrees/feat' > $$tmp/.git && \
-	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q -e '🌿' -e '🔀' \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"'"$$tmp"'"}}' | $(CURDIR)/$(TARGET) | grep -q -e '🌿' -e '🔀' \
 	  && echo "FAIL: rendered a branch with nothing to render" || echo "PASS: no field, no segment"; rm -rf $$tmp
 	@echo "Testing a plain non-git folder is unaffected by the fallback..."
 	@tmp=$$(mktemp -d) && \
-	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q '🌿' \
-	  && echo "FAIL: non-git folder rendered a branch" || echo "PASS: non-git folder stays silent"; rm -rf $$tmp
+	  if git -C $$tmp rev-parse >/dev/null 2>&1; then echo "SKIP: the temp folder is inside a git repo"; else \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"'"$$tmp"'"}}' | $(CURDIR)/$(TARGET) | grep -q '🌿' \
+	  && echo "FAIL: non-git folder rendered a branch" || echo "PASS: non-git folder stays silent"; fi; rm -rf $$tmp
 	@echo "Testing a real branch wins over the worktree field (fast path first)..."
 	@tmp=$$(mktemp -d) && mkdir -p $$tmp/.git && echo 'ref: refs/heads/real-branch' > $$tmp/.git/HEAD && \
-	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp","git_worktree":"ignored-name"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q 'ignored-name' \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"'"$$tmp"'","git_worktree":"ignored-name"}}' | $(CURDIR)/$(TARGET) | grep -q 'ignored-name' \
 	  && echo "FAIL: fallback overrode a readable HEAD" || echo "PASS: .git/HEAD takes precedence"; rm -rf $$tmp
 	@echo "Testing a normal ref still renders the branch name..."
 	@tmp=$$(mktemp -d) && mkdir -p $$tmp/.git && echo 'ref: refs/heads/some-branch' > $$tmp/.git/HEAD && \
-	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"}}' | (cd $$tmp && $(CURDIR)/$(TARGET)) | grep -q 'some-branch' \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"'"$$tmp"'"}}' | $(CURDIR)/$(TARGET) | grep -q 'some-branch' \
 	  && echo "PASS: ref renders branch name" || echo "FAIL: ref did not render the branch name"; rm -rf $$tmp
+	@echo "Testing a subfolder of a repo still shows the branch..."
+	@tmp=$$(mktemp -d) && mkdir -p $$tmp/.git $$tmp/a/b && echo 'ref: refs/heads/sub-branch' > $$tmp/.git/HEAD && \
+	  echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"'"$$tmp/a/b"'"}}' | $(CURDIR)/$(TARGET) | grep -q 'sub-branch' \
+	  && echo "PASS: subfolder shows the branch" || echo "FAIL: subfolder lost the branch"; rm -rf $$tmp
 	@echo ""
 	@echo "Testing --version prints name, semver and build SHA..."
 	@./$(TARGET) --version | grep -qE '^claude_statusline [0-9]+\.[0-9]+\.[0-9]+ \(.+\)$$' && echo "PASS: version format" || echo "FAIL: bad version format"
